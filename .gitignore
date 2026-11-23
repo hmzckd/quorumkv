@@ -1,0 +1,5 @@
+/data/
+/quorumkv
+/quorumkv.exe
+*.test
+coverage.out
