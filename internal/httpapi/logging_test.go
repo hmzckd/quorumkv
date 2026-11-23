@@ -11,7 +11,7 @@ import (
 
 func TestEveryRequestIsLoggedOnce(t *testing.T) {
 	var buf bytes.Buffer
-	handler := NewHandler(slog.New(slog.NewJSONHandler(&buf, nil)), "n1")
+	handler := NewHandler(slog.New(slog.NewJSONHandler(&buf, nil)), "n1", &fakeNode{})
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nope", nil))

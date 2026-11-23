@@ -2,15 +2,13 @@ package httpapi
 
 import (
 	"encoding/json"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
 func TestHealthReportsNode(t *testing.T) {
-	srv := httptest.NewServer(NewHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), "n2"))
+	srv := httptest.NewServer(NewHandler(quietLogger(), "n2", &fakeNode{}))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/health")
@@ -35,7 +33,7 @@ func TestHealthReportsNode(t *testing.T) {
 }
 
 func TestHealthRejectsPost(t *testing.T) {
-	srv := httptest.NewServer(NewHandler(slog.New(slog.NewTextHandler(io.Discard, nil)), "n1"))
+	srv := httptest.NewServer(NewHandler(quietLogger(), "n1", &fakeNode{}))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/health", "text/plain", nil)

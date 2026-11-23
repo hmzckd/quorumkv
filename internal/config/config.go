@@ -8,7 +8,10 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
+
+const Tick = 10 * time.Millisecond
 
 var nodeIDPattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 
@@ -23,6 +26,9 @@ type Config struct {
 	Addr     string
 	DataDir  string
 	LogLevel slog.Level
+
+	Heartbeat       time.Duration
+	ElectionTimeout time.Duration
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -50,7 +56,37 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("QK_LOG_LEVEL: %w", err)
 	}
 
+	if cfg.Heartbeat, err = parseDuration(getenv, "QK_HEARTBEAT", "50ms"); err != nil {
+		return Config{}, err
+	}
+	if cfg.ElectionTimeout, err = parseDuration(getenv, "QK_ELECTION_TIMEOUT", "150ms"); err != nil {
+		return Config{}, err
+	}
+	if cfg.Heartbeat < Tick {
+		return Config{}, fmt.Errorf("QK_HEARTBEAT must be at least %s", Tick)
+	}
+	if cfg.ElectionTimeout < 2*cfg.Heartbeat {
+		return Config{}, fmt.Errorf("QK_ELECTION_TIMEOUT (%s) must be at least twice QK_HEARTBEAT (%s)",
+			cfg.ElectionTimeout, cfg.Heartbeat)
+	}
+
 	return cfg, nil
+}
+
+func (c Config) HeartbeatTicks() int {
+	return int(c.Heartbeat / Tick)
+}
+
+func (c Config) ElectionTicks() int {
+	return int(c.ElectionTimeout / Tick)
+}
+
+func (c Config) PeerIDs() []string {
+	ids := make([]string, 0, len(c.Peers))
+	for _, p := range c.Peers {
+		ids = append(ids, p.ID)
+	}
+	return ids
 }
 
 func (c Config) Quorum() int {
@@ -98,6 +134,14 @@ func containsID(peers []Peer, id string) bool {
 		}
 	}
 	return false
+}
+
+func parseDuration(getenv func(string) string, key, fallback string) (time.Duration, error) {
+	d, err := time.ParseDuration(valueOr(getenv(key), fallback))
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return d, nil
 }
 
 func valueOr(value, fallback string) string {

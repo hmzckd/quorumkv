@@ -33,3 +33,5 @@ Terms used in the code and the docs. Each term means exactly one thing.
 | **fsync** | Asking the operating system to push a file's data to the physical disk. Until then a power cut can lose it. |
 | **Torn write** | A record that was only partly written when the process or machine died. The log reader finds it by its length or checksum and cuts it off. |
 | **CRC** | A 32-bit checksum stored with each log record. A single changed byte makes it mismatch. |
+| **Transport** | Carries Raft messages between nodes. Every message is a one-way `POST /raft/message` with a JSON body; a reply is a separate message going the other way. |
+| **Node loop** | The single goroutine in `internal/node` that feeds ticks and messages to the Raft core, writes `Ready` to disk, then hands its messages to the transport. Only this goroutine touches the core, so the core needs no locks. |

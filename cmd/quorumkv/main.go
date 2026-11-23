@@ -14,6 +14,8 @@ import (
 
 	"github.com/hmzckd/quorumkv/internal/config"
 	"github.com/hmzckd/quorumkv/internal/httpapi"
+	"github.com/hmzckd/quorumkv/internal/node"
+	"github.com/hmzckd/quorumkv/internal/transport"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -37,6 +39,28 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	peerURLs := map[string]string{}
+	for _, p := range cfg.Peers {
+		if p.ID != cfg.NodeID {
+			peerURLs[p.ID] = p.URL
+		}
+	}
+	tr := transport.NewHTTP(peerURLs, logger)
+
+	n, err := node.New(node.Config{
+		ID:             cfg.NodeID,
+		Peers:          cfg.PeerIDs(),
+		DataDir:        cfg.DataDir,
+		Tick:           config.Tick,
+		ElectionTicks:  cfg.ElectionTicks(),
+		HeartbeatTicks: cfg.HeartbeatTicks(),
+	}, tr, logger)
+	if err != nil {
+		return err
+	}
 
 	listener, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
@@ -44,18 +68,29 @@ func run() error {
 	}
 
 	srv := &http.Server{
-		Handler:           httpapi.NewHandler(logger, cfg.NodeID),
+		Handler:           httpapi.NewHandler(logger, cfg.NodeID, n),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
-	peerIDs := make([]string, 0, len(cfg.Peers))
-	for _, p := range cfg.Peers {
-		peerIDs = append(peerIDs, p.ID)
-	}
-	logger.Info("cluster config", "peers", peerIDs, "quorum", cfg.Quorum(), "data_dir", cfg.DataDir)
+	logger.Info("cluster config", "peers", cfg.PeerIDs(), "quorum", cfg.Quorum(), "data_dir", cfg.DataDir,
+		"heartbeat", cfg.Heartbeat.String(), "election_timeout", cfg.ElectionTimeout.String())
 
-	return serve(ctx, logger, srv, listener)
+	tr.Start(ctx)
+	nodeErr := make(chan error, 1)
+	go func() {
+		err := n.Run(ctx)
+		if err != nil {
+			logger.Error("raft loop failed, stopping", "error", err)
+			cancel()
+		}
+		nodeErr <- err
+	}()
+
+	if err := serve(ctx, logger, srv, listener); err != nil {
+		return err
+	}
+	return <-nodeErr
 }
 
 func serve(ctx context.Context, logger *slog.Logger, srv *http.Server, listener net.Listener) error {

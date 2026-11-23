@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"testing"
 	"time"
-
-	"github.com/hmzckd/quorumkv/internal/httpapi"
 )
 
 func TestServeStopsCleanlyWhenContextIsCancelled(t *testing.T) {
@@ -18,13 +16,13 @@ func TestServeStopsCleanlyWhenContextIsCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &http.Server{Handler: httpapi.NewHandler(logger, "n1")}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- serve(ctx, logger, srv, listener) }()
 
-	resp, err := http.Get("http://" + listener.Addr().String() + "/health")
+	resp, err := http.Get("http://" + listener.Addr().String() + "/anything")
 	if err != nil {
 		t.Fatalf("GET /health: %v", err)
 	}

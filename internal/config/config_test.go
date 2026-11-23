@@ -30,6 +30,9 @@ func TestLoadDefaults(t *testing.T) {
 	if len(cfg.Peers) != 3 || cfg.Peers[1] != (Peer{ID: "n2", URL: "http://localhost:7002"}) {
 		t.Errorf("Peers = %+v", cfg.Peers)
 	}
+	if cfg.HeartbeatTicks() != 5 || cfg.ElectionTicks() != 15 {
+		t.Errorf("ticks = heartbeat %d, election %d, want 5 and 15", cfg.HeartbeatTicks(), cfg.ElectionTicks())
+	}
 }
 
 func TestLoadSortsPeersAndTrimsSlash(t *testing.T) {
@@ -59,6 +62,9 @@ func TestLoadRejectsBadInput(t *testing.T) {
 		"duplicate id":       {"QK_NODE_ID": "n1", "QK_PEERS": "n1=http://a:7001,n1=http://b:7002"},
 		"bad url":            {"QK_NODE_ID": "n1", "QK_PEERS": "n1=localhost:7001"},
 		"bad log level":      {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_LOG_LEVEL": "loud"},
+		"bad heartbeat":      {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_HEARTBEAT": "fast"},
+		"heartbeat too fast": {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_HEARTBEAT": "5ms"},
+		"election too short": {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_ELECTION_TIMEOUT": "60ms"},
 	}
 	for name, values := range cases {
 		t.Run(name, func(t *testing.T) {
