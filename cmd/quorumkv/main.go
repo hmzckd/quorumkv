@@ -68,7 +68,7 @@ func run() error {
 	}
 
 	srv := &http.Server{
-		Handler:           httpapi.NewHandler(logger, cfg.NodeID, n),
+		Handler:           httpapi.NewHandler(logger, httpapi.Options{NodeID: cfg.NodeID, PeerURLs: peerURLs}, n),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

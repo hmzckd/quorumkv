@@ -24,6 +24,8 @@ type testCluster struct {
 	addrs map[string]string
 	dirs  map[string]string
 	procs map[string]*process
+
+	writeTimeout time.Duration
 }
 
 type process struct {
@@ -35,8 +37,13 @@ type process struct {
 
 func startCluster(t *testing.T, size int) *testCluster {
 	t.Helper()
+	return startClusterWith(t, size, 0)
+}
+
+func startClusterWith(t *testing.T, size int, writeTimeout time.Duration) *testCluster {
+	t.Helper()
 	c := &testCluster{t: t, urls: map[string]string{}, addrs: map[string]string{}, dirs: map[string]string{},
-		procs: map[string]*process{}}
+		procs: map[string]*process{}, writeTimeout: writeTimeout}
 	listeners := map[string]net.Listener{}
 	for i := 1; i <= size; i++ {
 		id := fmt.Sprintf("n%d", i)
@@ -86,7 +93,7 @@ func (c *testCluster) start(id string, l net.Listener) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &process{node: n, cancel: cancel, done: make(chan error, 1),
-		srv: &http.Server{Handler: httpapi.NewHandler(logger, id, n)}}
+		srv: &http.Server{Handler: httpapi.NewHandler(logger, httpapi.Options{NodeID: id, PeerURLs: c.urls, WriteTimeout: c.writeTimeout}, n)}}
 	tr.Start(ctx)
 	go func() { p.done <- n.Run(ctx) }()
 	go p.srv.Serve(l)
@@ -110,7 +117,7 @@ func (c *testCluster) restart(id string) {
 	c.start(id, nil)
 }
 
-func (c *testCluster) status(id string) raft.Status {
+func (c *testCluster) status(id string) node.Status {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	st, err := c.procs[id].node.Status(ctx)
@@ -127,7 +134,7 @@ func (c *testCluster) waitForLeader(among ...string) (string, uint64) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		var leaders []raft.Status
+		var leaders []node.Status
 		agree := true
 		for _, id := range among {
 			st := c.status(id)

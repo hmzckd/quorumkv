@@ -8,7 +8,7 @@ import (
 )
 
 func TestHealthReportsNode(t *testing.T) {
-	srv := httptest.NewServer(NewHandler(quietLogger(), "n2", &fakeNode{}))
+	srv := httptest.NewServer(handlerFor(&fakeNode{}))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/health")
@@ -33,7 +33,7 @@ func TestHealthReportsNode(t *testing.T) {
 }
 
 func TestHealthRejectsPost(t *testing.T) {
-	srv := httptest.NewServer(NewHandler(quietLogger(), "n1", &fakeNode{}))
+	srv := httptest.NewServer(handlerFor(&fakeNode{}))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/health", "text/plain", nil)

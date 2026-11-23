@@ -38,5 +38,9 @@ func receive(node Node) http.HandlerFunc {
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
+	writeBody(w, v)
+}
+
+func writeBody(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }

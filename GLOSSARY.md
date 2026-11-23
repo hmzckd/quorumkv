@@ -35,3 +35,7 @@ Terms used in the code and the docs. Each term means exactly one thing.
 | **CRC** | A 32-bit checksum stored with each log record. A single changed byte makes it mismatch. |
 | **Transport** | Carries Raft messages between nodes. Every message is a one-way `POST /raft/message` with a JSON body; a reply is a separate message going the other way. |
 | **Node loop** | The single goroutine in `internal/node` that feeds ticks and messages to the Raft core, writes `Ready` to disk, then hands its messages to the transport. Only this goroutine touches the core, so the core needs no locks. |
+| **Command** | What a log entry carries for the key-value store: `{"op":"put","key":"x","value":"1"}` or `{"op":"delete","key":"x"}`. |
+| **Idempotent** | Running a command twice leaves the same result as running it once. `PUT` and `DELETE` are idempotent, so a client may safely retry them. |
+| **Outcome unknown** | The answer to a write whose fate the leader cannot know (timeout, or it lost leadership). The entry may still be committed later. The client retries. |
+| **Redirect** | A follower answers client requests with `307 Temporary Redirect` and the leader's address in `Location`. |
