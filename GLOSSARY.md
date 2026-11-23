@@ -30,3 +30,6 @@ Terms used in the code and the docs. Each term means exactly one thing.
 | **Log matching** | If two logs have an entry with the same index and term, the logs are identical up to that index. `AppendEntries` checks the entry before the new ones (`prevLogIndex`, `prevLogTerm`) to keep this true. |
 | **Leader completeness** | A leader always holds every entry committed in earlier terms. Votes go only to candidates whose log is at least as up to date as the voter's. |
 | **State machine safety** | No two nodes ever apply different entries at the same index. The simulator checks it on every apply. |
+| **fsync** | Asking the operating system to push a file's data to the physical disk. Until then a power cut can lose it. |
+| **Torn write** | A record that was only partly written when the process or machine died. The log reader finds it by its length or checksum and cuts it off. |
+| **CRC** | A 32-bit checksum stored with each log record. A single changed byte makes it mismatch. |
