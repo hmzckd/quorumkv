@@ -21,3 +21,12 @@ Terms used in the code and the docs. Each term means exactly one thing.
 | **Seed** | The number that drives every random choice of a simulation run. The same seed always replays the same run. |
 | **Partition** | A network split: nodes in different groups cannot reach each other until the network heals. |
 | **Election safety** | At most one leader per term. The simulator checks it after every tick. |
+| **Log** | The ordered list of entries a node keeps. Index 1 is the first entry. The leader's log is the source of truth; followers copy it. |
+| **Entry** | One command in the log, with the term it was created in and its index. An entry with no data is a no-op. |
+| **No-op entry** | An empty entry a new leader appends right after winning. Committing it also commits every older entry and proves the leader's log is current. |
+| **Commit** | An entry is committed once the leader of its term has it stored on a quorum. A committed entry is never lost or changed. |
+| **Commit index** | The highest index a node knows to be committed. |
+| **Apply** | Executing committed entries, in index order, against the key-value map. Every node applies the same entries in the same order. |
+| **Log matching** | If two logs have an entry with the same index and term, the logs are identical up to that index. `AppendEntries` checks the entry before the new ones (`prevLogIndex`, `prevLogTerm`) to keep this true. |
+| **Leader completeness** | A leader always holds every entry committed in earlier terms. Votes go only to candidates whose log is at least as up to date as the voter's. |
+| **State machine safety** | No two nodes ever apply different entries at the same index. The simulator checks it on every apply. |

@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -191,5 +192,93 @@ func TestElectionSafetyCheckCatchesTwoLeaders(t *testing.T) {
 	err := c.checkElectionSafety()
 	if err == nil || !strings.Contains(err.Error(), "term 4") {
 		t.Fatalf("err = %v, want an election safety violation for term 4", err)
+	}
+}
+
+func TestMinorityWritesAreDiscarded(t *testing.T) {
+	c := New(Options{Seed: 7})
+	old := mustLeader(t, c)
+	majority := others(c, old)
+
+	c.Partition([]string{old}, majority)
+	lostIndex, _, err := c.Propose(old, "x=lost")
+	if err != nil {
+		t.Fatalf("propose on old leader: %v", err)
+	}
+	next := mustLeader(t, c, majority...)
+	keptIndex, _, err := c.Propose(next, "x=kept")
+	if err != nil {
+		t.Fatalf("propose on new leader: %v", err)
+	}
+	if err := c.Run(100); err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := c.Committed(lostIndex); ok && string(e.Data) == "x=lost" {
+		t.Fatalf("minority write was committed: %+v", e)
+	}
+
+	c.Heal()
+	if err := c.Run(200); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, e := range c.Log(old) {
+		if string(e.Data) == "x=lost" {
+			t.Fatalf("%s still has x=lost after healing", old)
+		}
+	}
+	if e, ok := c.Committed(keptIndex); !ok || string(e.Data) != "x=kept" {
+		t.Fatalf("x=kept not committed at %d", keptIndex)
+	}
+	if got := c.Status(old).CommitIndex; got < keptIndex {
+		t.Errorf("%s commit = %d, want at least %d", old, got, keptIndex)
+	}
+
+	t.Logf("timeline:\n%s", c.Timeline())
+}
+
+func TestCommittedWriteSurvivesLeaderCrash(t *testing.T) {
+	c := New(Options{Seed: 13})
+	leader := mustLeader(t, c)
+	index, _, _ := c.Propose(leader, "x=1")
+	if err := c.RunUntil(200, func() bool { _, ok := c.Committed(index); return ok }); err != nil {
+		t.Fatal(err)
+	}
+
+	c.Crash(leader)
+	next := mustLeader(t, c, others(c, leader)...)
+	if err := c.Run(50); err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, e := range c.Log(next) {
+		found = found || string(e.Data) == "x=1"
+	}
+	if !found {
+		t.Fatalf("new leader %s lost the committed write", next)
+	}
+}
+
+func TestReplicationUnderMessageLoss(t *testing.T) {
+	for seed := uint64(1); seed <= 30; seed++ {
+		c := New(Options{Seed: seed, DropRate: 0.2, MaxDelay: 6})
+		accepted := 0
+		for round := 0; round < 100; round++ {
+			if leader, _ := c.LeaderOfHighestTerm(); leader != "" {
+				if _, _, err := c.Propose(leader, fmt.Sprintf("v%d", round)); err == nil {
+					accepted++
+				}
+			}
+			if err := c.Run(10); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := c.Run(300); err != nil {
+			t.Fatal(err)
+		}
+		if len(c.committed) < accepted/2 {
+			t.Errorf("seed %d: only %d of %d accepted proposals committed", seed, len(c.committed), accepted)
+		}
 	}
 }

@@ -18,7 +18,7 @@ func newTestRaft(t *testing.T, id string, peers []string, seed uint64) *Raft {
 		ElectionTicks:  electionTicks,
 		HeartbeatTicks: heartbeatTicks,
 		Rand:           rand.New(rand.NewPCG(seed, seed)),
-	}, HardState{})
+	}, State{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -29,11 +29,12 @@ type network struct {
 	t     *testing.T
 	nodes map[string]*Raft
 	order []string
+	down  map[string]bool
 	log   bool
 }
 
 func newNetwork(t *testing.T, ids ...string) *network {
-	n := &network{t: t, nodes: map[string]*Raft{}, order: ids}
+	n := &network{t: t, nodes: map[string]*Raft{}, order: ids, down: map[string]bool{}}
 	for i, id := range ids {
 		n.nodes[id] = newTestRaft(t, id, ids, uint64(i+1))
 	}
@@ -50,6 +51,9 @@ func (n *network) deliver() {
 			return
 		}
 		for _, m := range pending {
+			if n.down[m.From] || n.down[m.To] {
+				continue
+			}
 			if n.log && m.Type == MsgVote {
 				n.t.Logf("  %s -> %s %s term=%d", m.From, m.To, m.Type, m.Term)
 			}
@@ -63,7 +67,9 @@ func (n *network) deliver() {
 
 func (n *network) tickAll() {
 	for _, id := range n.order {
-		n.nodes[id].Tick()
+		if !n.down[id] {
+			n.nodes[id].Tick()
+		}
 	}
 	n.deliver()
 }
@@ -99,7 +105,7 @@ func TestNewRejectsBadConfig(t *testing.T) {
 	}
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := New(cfg, HardState{}); err == nil {
+			if _, err := New(cfg, State{}); err == nil {
 				t.Fatal("expected an error")
 			}
 		})
@@ -186,7 +192,7 @@ func TestVoteIsKeptAcrossRestart(t *testing.T) {
 	saved := r.Ready().HardState
 
 	restarted, err := New(Config{ID: "n1", Peers: peers, ElectionTicks: 10, HeartbeatTicks: 2,
-		Rand: rand.New(rand.NewPCG(9, 9))}, *saved)
+		Rand: rand.New(rand.NewPCG(9, 9))}, State{HardState: *saved})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

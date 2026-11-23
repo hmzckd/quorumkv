@@ -20,17 +20,19 @@ type Options struct {
 }
 
 type Cluster struct {
-	opts     Options
-	rand     *rand.Rand
-	now      int
-	ids      []string
-	nodes    map[string]*node
-	inflight []envelope
-	seq      int
-	group    map[string]int
-	events   []string
-	leaders  map[uint64]string
-	failure  error
+	opts      Options
+	rand      *rand.Rand
+	now       int
+	ids       []string
+	nodes     map[string]*node
+	inflight  []envelope
+	seq       int
+	group     map[string]int
+	events    []string
+	leaders   map[uint64]string
+	committed map[uint64]raft.Entry
+	commitIn  map[uint64]uint64
+	failure   error
 }
 
 type node struct {
@@ -40,10 +42,12 @@ type node struct {
 	up       bool
 	restarts uint64
 	status   raft.Status
+	applied  uint64
 }
 
 type disk struct {
 	hardState raft.HardState
+	entries   []raft.Entry
 }
 
 type envelope struct {
@@ -70,11 +74,13 @@ func New(opts Options) *Cluster {
 	}
 
 	c := &Cluster{
-		opts:    opts,
-		rand:    rand.New(rand.NewPCG(opts.Seed, 0)),
-		nodes:   map[string]*node{},
-		group:   map[string]int{},
-		leaders: map[uint64]string{},
+		opts:      opts,
+		rand:      rand.New(rand.NewPCG(opts.Seed, 0)),
+		nodes:     map[string]*node{},
+		group:     map[string]int{},
+		leaders:   map[uint64]string{},
+		committed: map[uint64]raft.Entry{},
+		commitIn:  map[uint64]uint64{},
 	}
 	for i := 1; i <= opts.Nodes; i++ {
 		c.ids = append(c.ids, fmt.Sprintf("n%d", i))
@@ -94,12 +100,13 @@ func (c *Cluster) start(n *node) {
 		ElectionTicks:  c.opts.ElectionTicks,
 		HeartbeatTicks: c.opts.HeartbeatTicks,
 		Rand:           rand.New(rand.NewPCG(c.opts.Seed, uint64(slices.Index(c.ids, n.id)+1)<<16|n.restarts)),
-	}, n.disk.hardState)
+	}, raft.State{HardState: n.disk.hardState, Entries: n.disk.entries})
 	if err != nil {
 		panic(err)
 	}
 	n.raft = r
 	n.up = true
+	n.applied = 0
 	n.status = r.Status()
 }
 
@@ -174,8 +181,81 @@ func (c *Cluster) handleReady(n *node) {
 	if rd.HardState != nil {
 		n.disk.hardState = *rd.HardState
 	}
+	if len(rd.Entries) > 0 {
+		c.persistEntries(n, rd.Entries)
+	}
 	for _, m := range rd.Messages {
 		c.send(m)
+	}
+	for _, e := range rd.Committed {
+		c.apply(n, e)
+	}
+}
+
+func (c *Cluster) persistEntries(n *node, entries []raft.Entry) {
+	first := entries[0].Index
+	if last := uint64(len(n.disk.entries)); first <= last {
+		c.eventf("%s overwrote its log from index %d (had %d entries)", n.id, first, last)
+		n.disk.entries = n.disk.entries[:first-1]
+	}
+	n.disk.entries = append(n.disk.entries, entries...)
+}
+
+func (c *Cluster) apply(n *node, e raft.Entry) {
+	if c.failure != nil {
+		return
+	}
+	if e.Index != n.applied+1 {
+		c.fail("%s applied index %d after %d: gap or repeat", n.id, e.Index, n.applied)
+		return
+	}
+	n.applied = e.Index
+	if prev, ok := c.committed[e.Index]; ok {
+		if prev.Term != e.Term || string(prev.Data) != string(e.Data) {
+			c.fail("state machine safety violated: %s applied %s at index %d, another node applied %s",
+				n.id, describe(e), e.Index, describe(prev))
+		}
+		return
+	}
+	c.committed[e.Index] = e
+	c.commitIn[e.Index] = n.raft.Status().Term
+	if len(e.Data) > 0 {
+		c.eventf("%s committed index %d %s", n.id, e.Index, describe(e))
+	}
+}
+
+func describe(e raft.Entry) string {
+	if len(e.Data) == 0 {
+		return fmt.Sprintf("(term %d, no-op)", e.Term)
+	}
+	return fmt.Sprintf("(term %d, %q)", e.Term, e.Data)
+}
+
+func (c *Cluster) Propose(id string, data string) (index, term uint64, err error) {
+	n := c.nodes[id]
+	if !n.up {
+		return 0, 0, fmt.Errorf("%s is down", id)
+	}
+	index, term, err = n.raft.Propose([]byte(data))
+	if err == nil {
+		c.eventf("%s accepted %q at index %d term %d", id, data, index, term)
+	}
+	c.handleReady(n)
+	return index, term, err
+}
+
+func (c *Cluster) Committed(index uint64) (raft.Entry, bool) {
+	e, ok := c.committed[index]
+	return e, ok
+}
+
+func (c *Cluster) Log(id string) []raft.Entry {
+	return slices.Clone(c.nodes[id].disk.entries)
+}
+
+func (c *Cluster) fail(format string, args ...any) {
+	if c.failure == nil {
+		c.failure = fmt.Errorf("seed %d, tick %d: %s\n%s", c.opts.Seed, c.now, fmt.Sprintf(format, args...), c.Timeline())
 	}
 }
 
@@ -203,8 +283,11 @@ func (c *Cluster) observe() {
 		}
 		n.status = st
 	}
-	if err := c.checkElectionSafety(); err != nil && c.failure == nil {
-		c.failure = fmt.Errorf("seed %d, tick %d: %w\n%s", c.opts.Seed, c.now, err, c.Timeline())
+	if err := c.checkElectionSafety(); err != nil {
+		c.fail("%v", err)
+	}
+	if err := c.checkLeaderCompleteness(); err != nil {
+		c.fail("%v", err)
 	}
 }
 
@@ -218,6 +301,23 @@ func (c *Cluster) checkElectionSafety() error {
 			return fmt.Errorf("election safety violated: %s and %s are both leaders of term %d", prev, id, n.status.Term)
 		}
 		c.leaders[n.status.Term] = id
+	}
+	return nil
+}
+
+func (c *Cluster) checkLeaderCompleteness() error {
+	for _, id := range c.Leaders() {
+		r := c.nodes[id].raft
+		term := c.nodes[id].status.Term
+		for index, e := range c.committed {
+			if term <= c.commitIn[index] {
+				continue
+			}
+			if t, ok := r.LogTerm(index); !ok || t != e.Term {
+				return fmt.Errorf("leader completeness violated: leader %s of term %d lacks index %d committed in term %d",
+					id, term, index, c.commitIn[index])
+			}
+		}
 	}
 	return nil
 }
@@ -254,7 +354,8 @@ func (c *Cluster) Restart(id string) {
 	n := c.nodes[id]
 	n.restarts++
 	c.start(n)
-	c.eventf("restart %s (term=%d votedFor=%q from disk)", id, n.disk.hardState.Term, n.disk.hardState.VotedFor)
+	c.eventf("restart %s (term=%d votedFor=%q, %d log entries from disk)",
+		id, n.disk.hardState.Term, n.disk.hardState.VotedFor, len(n.disk.entries))
 }
 
 func (c *Cluster) Status(id string) raft.Status {

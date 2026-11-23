@@ -7,6 +7,10 @@ import (
 	"slices"
 )
 
+const maxEntriesPerMessage = 64
+
+var ErrNotLeader = errors.New("not the leader")
+
 type Role string
 
 const (
@@ -20,6 +24,11 @@ type HardState struct {
 	VotedFor string `json:"votedFor"`
 }
 
+type State struct {
+	HardState HardState
+	Entries   []Entry
+}
+
 type Config struct {
 	ID             string
 	Peers          []string
@@ -30,14 +39,19 @@ type Config struct {
 
 type Ready struct {
 	HardState *HardState
+	Entries   []Entry
+	Committed []Entry
 	Messages  []Message
 }
 
 type Status struct {
-	ID     string `json:"id"`
-	Role   Role   `json:"role"`
-	Term   uint64 `json:"term"`
-	Leader string `json:"leader"`
+	ID          string `json:"id"`
+	Role        Role   `json:"role"`
+	Term        uint64 `json:"term"`
+	Leader      string `json:"leader"`
+	LastIndex   uint64 `json:"lastIndex"`
+	CommitIndex uint64 `json:"commitIndex"`
+	Applied     uint64 `json:"applied"`
 }
 
 type Raft struct {
@@ -53,15 +67,25 @@ type Raft struct {
 	leader   string
 	votes    map[string]bool
 
+	log         []Entry
+	offset      uint64
+	offsetTerm  uint64
+	commitIndex uint64
+	applied     uint64
+
+	nextIndex  map[string]uint64
+	matchIndex map[string]uint64
+
 	electionElapsed  int
 	electionTimeout  int
 	heartbeatElapsed int
 
 	msgs             []Message
 	hardStateChanged bool
+	unstableFrom     uint64
 }
 
-func New(cfg Config, hs HardState) (*Raft, error) {
+func New(cfg Config, st State) (*Raft, error) {
 	if !slices.Contains(cfg.Peers, cfg.ID) {
 		return nil, fmt.Errorf("peers %v must contain %q", cfg.Peers, cfg.ID)
 	}
@@ -70,6 +94,11 @@ func New(cfg Config, hs HardState) (*Raft, error) {
 	}
 	if cfg.Rand == nil {
 		return nil, errors.New("Rand is required")
+	}
+	for i, e := range st.Entries {
+		if e.Index != uint64(i)+1 {
+			return nil, fmt.Errorf("entry %d has index %d, want %d", i, e.Index, i+1)
+		}
 	}
 
 	peers := slices.Clone(cfg.Peers)
@@ -81,16 +110,25 @@ func New(cfg Config, hs HardState) (*Raft, error) {
 		electionTicks:  cfg.ElectionTicks,
 		heartbeatTicks: cfg.HeartbeatTicks,
 		rand:           cfg.Rand,
-		term:           hs.Term,
-		votedFor:       hs.VotedFor,
+		term:           st.HardState.Term,
+		votedFor:       st.HardState.VotedFor,
 		role:           Follower,
+		log:            slices.Clone(st.Entries),
 	}
 	r.resetElectionTimer()
 	return r, nil
 }
 
 func (r *Raft) Status() Status {
-	return Status{ID: r.id, Role: r.role, Term: r.term, Leader: r.leader}
+	return Status{
+		ID:          r.id,
+		Role:        r.role,
+		Term:        r.term,
+		Leader:      r.leader,
+		LastIndex:   r.lastIndex(),
+		CommitIndex: r.commitIndex,
+		Applied:     r.applied,
+	}
 }
 
 func (r *Raft) Ready() Ready {
@@ -99,9 +137,30 @@ func (r *Raft) Ready() Ready {
 		rd.HardState = &HardState{Term: r.term, VotedFor: r.votedFor}
 		r.hardStateChanged = false
 	}
+	if r.unstableFrom != 0 {
+		rd.Entries = r.entriesFrom(r.unstableFrom, 0)
+		r.unstableFrom = 0
+	}
+	if r.commitIndex > r.applied {
+		rd.Committed = r.entriesFrom(r.applied+1, int(r.commitIndex-r.applied))
+		r.applied = r.commitIndex
+	}
 	rd.Messages = r.msgs
 	r.msgs = nil
 	return rd
+}
+
+func (r *Raft) Propose(data []byte) (index, term uint64, err error) {
+	if r.role != Leader {
+		return 0, 0, ErrNotLeader
+	}
+	e := Entry{Term: r.term, Index: r.lastIndex() + 1, Data: data}
+	r.appendEntry(e)
+	r.matchIndex[r.id] = e.Index
+	if !r.maybeCommit() {
+		r.broadcastAppend()
+	}
+	return e.Index, e.Term, nil
 }
 
 func (r *Raft) Tick() {
@@ -109,7 +168,7 @@ func (r *Raft) Tick() {
 		r.heartbeatElapsed++
 		if r.heartbeatElapsed >= r.heartbeatTicks {
 			r.heartbeatElapsed = 0
-			r.broadcastHeartbeat()
+			r.broadcastAppend()
 		}
 		return
 	}
@@ -137,7 +196,7 @@ func (r *Raft) Step(m Message) {
 		case MsgVote:
 			r.send(Message{Type: MsgVoteResp, To: m.From, Granted: false})
 		case MsgApp:
-			r.send(Message{Type: MsgAppResp, To: m.From, Success: false})
+			r.send(Message{Type: MsgAppResp, To: m.From, Success: false, RejectHint: r.lastIndex()})
 		}
 		return
 	}
@@ -150,6 +209,7 @@ func (r *Raft) Step(m Message) {
 	case MsgApp:
 		r.handleAppend(m)
 	case MsgAppResp:
+		r.handleAppendResponse(m)
 	}
 }
 
@@ -167,13 +227,13 @@ func (r *Raft) campaign() {
 		return
 	}
 	for _, p := range r.others() {
-		r.send(Message{Type: MsgVote, To: p})
+		r.send(Message{Type: MsgVote, To: p, LastLogIndex: r.lastIndex(), LastLogTerm: r.lastTerm()})
 	}
 }
 
 func (r *Raft) handleVote(m Message) {
 	canVote := r.votedFor == "" || r.votedFor == m.From
-	if !canVote {
+	if !canVote || !r.isUpToDate(m.LastLogIndex, m.LastLogTerm) {
 		r.send(Message{Type: MsgVoteResp, To: m.From, Granted: false})
 		return
 	}
@@ -201,7 +261,76 @@ func (r *Raft) handleAppend(m Message) {
 	}
 	r.leader = m.From
 	r.electionElapsed = 0
-	r.send(Message{Type: MsgAppResp, To: m.From, Success: true})
+
+	if m.PrevLogIndex < r.commitIndex {
+		r.send(Message{Type: MsgAppResp, To: m.From, Success: true, MatchIndex: r.commitIndex})
+		return
+	}
+	if prevTerm, ok := r.termAt(m.PrevLogIndex); !ok || prevTerm != m.PrevLogTerm {
+		hint := min(r.lastIndex(), m.PrevLogIndex-1)
+		r.send(Message{Type: MsgAppResp, To: m.From, Success: false, RejectHint: hint})
+		return
+	}
+
+	for _, e := range m.Entries {
+		if e.Index <= r.lastIndex() {
+			if t, _ := r.termAt(e.Index); t == e.Term {
+				continue
+			}
+			r.truncateFrom(e.Index)
+		}
+		r.appendEntry(e)
+	}
+
+	lastNew := m.PrevLogIndex + uint64(len(m.Entries))
+	if commit := min(m.LeaderCommit, lastNew); commit > r.commitIndex {
+		r.commitIndex = commit
+	}
+	r.send(Message{Type: MsgAppResp, To: m.From, Success: true, MatchIndex: lastNew})
+}
+
+func (r *Raft) handleAppendResponse(m Message) {
+	if r.role != Leader {
+		return
+	}
+	if !m.Success {
+		if r.nextIndex[m.From] <= r.matchIndex[m.From]+1 {
+			return
+		}
+		r.nextIndex[m.From] = max(1, min(r.nextIndex[m.From]-1, m.RejectHint+1))
+		r.sendAppend(m.From)
+		return
+	}
+
+	if m.MatchIndex > r.matchIndex[m.From] {
+		r.matchIndex[m.From] = m.MatchIndex
+	}
+	if m.MatchIndex+1 > r.nextIndex[m.From] {
+		r.nextIndex[m.From] = m.MatchIndex + 1
+	}
+	r.maybeCommit()
+	if r.nextIndex[m.From] <= r.lastIndex() {
+		r.sendAppend(m.From)
+	}
+}
+
+func (r *Raft) maybeCommit() bool {
+	matched := make([]uint64, 0, len(r.peers))
+	for _, p := range r.peers {
+		matched = append(matched, r.matchIndex[p])
+	}
+	slices.Sort(matched)
+	slices.Reverse(matched)
+	n := matched[r.quorum()-1]
+
+	if n <= r.commitIndex {
+		return false
+	}
+	if t, _ := r.termAt(n); t != r.term {
+		return false
+	}
+	r.commitIndex = n
+	return true
 }
 
 func (r *Raft) becomeFollower(term uint64, leader string) {
@@ -213,6 +342,8 @@ func (r *Raft) becomeFollower(term uint64, leader string) {
 	r.role = Follower
 	r.leader = leader
 	r.votes = nil
+	r.nextIndex = nil
+	r.matchIndex = nil
 	r.resetElectionTimer()
 }
 
@@ -221,13 +352,38 @@ func (r *Raft) becomeLeader() {
 	r.leader = r.id
 	r.votes = nil
 	r.heartbeatElapsed = 0
-	r.broadcastHeartbeat()
+
+	r.nextIndex = map[string]uint64{}
+	r.matchIndex = map[string]uint64{}
+	for _, p := range r.peers {
+		r.nextIndex[p] = r.lastIndex() + 1
+	}
+
+	noop := Entry{Term: r.term, Index: r.lastIndex() + 1}
+	r.appendEntry(noop)
+	r.matchIndex[r.id] = noop.Index
+	if !r.maybeCommit() {
+		r.broadcastAppend()
+	}
 }
 
-func (r *Raft) broadcastHeartbeat() {
+func (r *Raft) broadcastAppend() {
 	for _, p := range r.others() {
-		r.send(Message{Type: MsgApp, To: p})
+		r.sendAppend(p)
 	}
+}
+
+func (r *Raft) sendAppend(to string) {
+	prev := r.nextIndex[to] - 1
+	prevTerm, _ := r.termAt(prev)
+	r.send(Message{
+		Type:         MsgApp,
+		To:           to,
+		PrevLogIndex: prev,
+		PrevLogTerm:  prevTerm,
+		Entries:      r.entriesFrom(prev+1, maxEntriesPerMessage),
+		LeaderCommit: r.commitIndex,
+	})
 }
 
 func (r *Raft) resetElectionTimer() {
