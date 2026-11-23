@@ -17,3 +17,7 @@ Terms used in the code and the docs. Each term means exactly one thing.
 | **Hard state** | The term and the vote of a node. It must reach disk before the node answers, otherwise a restarted node could vote twice in one term. |
 | **Tick** | One unit of time for the Raft core. The core never reads the clock; the runtime calls `Tick()` every 10 ms. |
 | **Ready** | What the core asks the runtime to do after an input: state to persist and messages to send. |
+| **Simulation** | Tests in `internal/sim` that run several Raft cores in one process over a fake network and a fake clock. The test decides which messages are lost, delayed or blocked. |
+| **Seed** | The number that drives every random choice of a simulation run. The same seed always replays the same run. |
+| **Partition** | A network split: nodes in different groups cannot reach each other until the network heals. |
+| **Election safety** | At most one leader per term. The simulator checks it after every tick. |
