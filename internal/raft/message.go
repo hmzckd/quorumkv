@@ -33,4 +33,6 @@ type Message struct {
 	Success    bool   `json:"success,omitempty"`
 	MatchIndex uint64 `json:"matchIndex,omitempty"`
 	RejectHint uint64 `json:"rejectHint,omitempty"`
+
+	ReadContext uint64 `json:"readContext,omitempty"`
 }

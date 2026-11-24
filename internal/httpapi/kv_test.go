@@ -84,3 +84,31 @@ func TestBadKeysAndValues(t *testing.T) {
 		t.Errorf("large value status = %d, want 413", rec.Code)
 	}
 }
+
+func TestGetReturnsValueOr404(t *testing.T) {
+	h := handlerFor(&fakeNode{values: map[string]string{"color": "blue"}})
+
+	rec := do(h, http.MethodGet, "/kv/color", "")
+	if rec.Code != http.StatusOK || rec.Body.String() != "blue" {
+		t.Fatalf("GET color = %d %q, want 200 blue", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, http.MethodGet, "/kv/size", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("GET size = %d, want 404", rec.Code)
+	}
+}
+
+func TestGetOnFollowerRedirects(t *testing.T) {
+	rec := do(handlerFor(&fakeNode{err: &node.NotLeaderError{Leader: "n1"}}), http.MethodGet, "/kv/color", "")
+	if rec.Code != http.StatusTemporaryRedirect || rec.Header().Get("Location") != "http://n1:7001/kv/color" {
+		t.Fatalf("GET on follower = %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+func TestGetErrorsAre503(t *testing.T) {
+	for _, err := range []error{node.ErrNotReady, node.ErrTimeout} {
+		rec := do(handlerFor(&fakeNode{err: err}), http.MethodGet, "/kv/color", "")
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("%v: status = %d, want 503", err, rec.Code)
+		}
+	}
+}

@@ -15,6 +15,28 @@ const (
 	maxValueBytes = 64 << 10
 )
 
+func get(n Node, opts Options) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key, ok := validKey(w, r)
+		if !ok {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), opts.Timeout)
+		defer cancel()
+
+		value, found, err := n.Get(ctx, key)
+		switch {
+		case err != nil:
+			writeError(w, r, opts, err)
+		case !found:
+			writeProblem(w, http.StatusNotFound, "Key not found", "no value is stored under this key")
+		default:
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			io.WriteString(w, value)
+		}
+	}
+}
+
 func put(n Node, opts Options) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key, ok := validKey(w, r)
@@ -41,7 +63,7 @@ func del(n Node, opts Options) http.HandlerFunc {
 }
 
 func write(w http.ResponseWriter, r *http.Request, n Node, opts Options, cmd kv.Command) {
-	ctx, cancel := context.WithTimeout(r.Context(), opts.WriteTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), opts.Timeout)
 	defer cancel()
 
 	err := n.Propose(ctx, cmd)
@@ -66,8 +88,13 @@ func writeError(w http.ResponseWriter, r *http.Request, opts Options, err error)
 	case errors.As(err, &notLeader):
 		w.Header().Set("Retry-After", "1")
 		writeProblem(w, http.StatusServiceUnavailable, "No leader", "an election is in progress, retry in a moment")
+	case errors.Is(err, node.ErrNotReady):
+		w.Header().Set("Retry-After", "1")
+		writeProblem(w, http.StatusServiceUnavailable, "Leader not ready", err.Error())
 	case errors.Is(err, node.ErrUnknownOutcome):
 		writeProblem(w, http.StatusServiceUnavailable, "Outcome unknown", err.Error())
+	case errors.Is(err, node.ErrTimeout):
+		writeProblem(w, http.StatusServiceUnavailable, "Timeout", err.Error())
 	default:
 		writeProblem(w, http.StatusServiceUnavailable, "Not applied", err.Error())
 	}

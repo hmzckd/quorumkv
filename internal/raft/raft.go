@@ -9,7 +9,10 @@ import (
 
 const maxEntriesPerMessage = 64
 
-var ErrNotLeader = errors.New("not the leader")
+var (
+	ErrNotLeader      = errors.New("not the leader")
+	ErrLeaderNotReady = errors.New("leader has not committed an entry in its term yet")
+)
 
 type Role string
 
@@ -38,10 +41,22 @@ type Config struct {
 }
 
 type Ready struct {
-	HardState *HardState
-	Entries   []Entry
-	Committed []Entry
-	Messages  []Message
+	HardState  *HardState
+	Entries    []Entry
+	Committed  []Entry
+	Messages   []Message
+	ReadStates []ReadState
+}
+
+type ReadState struct {
+	ID    uint64
+	Index uint64
+}
+
+type pendingRead struct {
+	id    uint64
+	index uint64
+	acks  map[string]bool
 }
 
 type Status struct {
@@ -75,6 +90,10 @@ type Raft struct {
 
 	nextIndex  map[string]uint64
 	matchIndex map[string]uint64
+
+	readSeq      uint64
+	pendingReads []*pendingRead
+	readyReads   []ReadState
 
 	electionElapsed  int
 	electionTimeout  int
@@ -147,7 +166,43 @@ func (r *Raft) Ready() Ready {
 	}
 	rd.Messages = r.msgs
 	r.msgs = nil
+	rd.ReadStates = r.readyReads
+	r.readyReads = nil
 	return rd
+}
+
+func (r *Raft) ReadIndex() (uint64, error) {
+	if r.role != Leader {
+		return 0, ErrNotLeader
+	}
+	if t, _ := r.termAt(r.commitIndex); t != r.term {
+		return 0, ErrLeaderNotReady
+	}
+
+	r.readSeq++
+	read := &pendingRead{id: r.readSeq, index: r.commitIndex, acks: map[string]bool{r.id: true}}
+	if len(read.acks) >= r.quorum() {
+		r.readyReads = append(r.readyReads, ReadState{ID: read.id, Index: read.index})
+		return read.id, nil
+	}
+	r.pendingReads = append(r.pendingReads, read)
+	r.broadcastAppend()
+	return read.id, nil
+}
+
+func (r *Raft) ackReads(from string, context uint64) {
+	remaining := r.pendingReads[:0]
+	for _, read := range r.pendingReads {
+		if read.id <= context {
+			read.acks[from] = true
+		}
+		if len(read.acks) >= r.quorum() {
+			r.readyReads = append(r.readyReads, ReadState{ID: read.id, Index: read.index})
+			continue
+		}
+		remaining = append(remaining, read)
+	}
+	r.pendingReads = remaining
 }
 
 func (r *Raft) Propose(data []byte) (index, term uint64, err error) {
@@ -263,12 +318,12 @@ func (r *Raft) handleAppend(m Message) {
 	r.electionElapsed = 0
 
 	if m.PrevLogIndex < r.commitIndex {
-		r.send(Message{Type: MsgAppResp, To: m.From, Success: true, MatchIndex: r.commitIndex})
+		r.send(Message{Type: MsgAppResp, To: m.From, Success: true, MatchIndex: r.commitIndex, ReadContext: m.ReadContext})
 		return
 	}
 	if prevTerm, ok := r.termAt(m.PrevLogIndex); !ok || prevTerm != m.PrevLogTerm {
 		hint := min(r.lastIndex(), m.PrevLogIndex-1)
-		r.send(Message{Type: MsgAppResp, To: m.From, Success: false, RejectHint: hint})
+		r.send(Message{Type: MsgAppResp, To: m.From, Success: false, RejectHint: hint, ReadContext: m.ReadContext})
 		return
 	}
 
@@ -286,13 +341,14 @@ func (r *Raft) handleAppend(m Message) {
 	if commit := min(m.LeaderCommit, lastNew); commit > r.commitIndex {
 		r.commitIndex = commit
 	}
-	r.send(Message{Type: MsgAppResp, To: m.From, Success: true, MatchIndex: lastNew})
+	r.send(Message{Type: MsgAppResp, To: m.From, Success: true, MatchIndex: lastNew, ReadContext: m.ReadContext})
 }
 
 func (r *Raft) handleAppendResponse(m Message) {
 	if r.role != Leader {
 		return
 	}
+	r.ackReads(m.From, m.ReadContext)
 	if !m.Success {
 		if r.nextIndex[m.From] <= r.matchIndex[m.From]+1 {
 			return
@@ -344,6 +400,7 @@ func (r *Raft) becomeFollower(term uint64, leader string) {
 	r.votes = nil
 	r.nextIndex = nil
 	r.matchIndex = nil
+	r.pendingReads = nil
 	r.resetElectionTimer()
 }
 
@@ -383,6 +440,7 @@ func (r *Raft) sendAppend(to string) {
 		PrevLogTerm:  prevTerm,
 		Entries:      r.entriesFrom(prev+1, maxEntriesPerMessage),
 		LeaderCommit: r.commitIndex,
+		ReadContext:  r.readSeq,
 	})
 }
 

@@ -17,6 +17,15 @@ type fakeNode struct {
 	full      bool
 	proposed  []kv.Command
 	err       error
+	values    map[string]string
+}
+
+func (f *fakeNode) Get(_ context.Context, key string) (string, bool, error) {
+	if f.err != nil {
+		return "", false, f.err
+	}
+	v, ok := f.values[key]
+	return v, ok, nil
 }
 
 func (f *fakeNode) Status(context.Context) (node.Status, error) { return f.status, nil }

@@ -39,3 +39,6 @@ Terms used in the code and the docs. Each term means exactly one thing.
 | **Idempotent** | Running a command twice leaves the same result as running it once. `PUT` and `DELETE` are idempotent, so a client may safely retry them. |
 | **Outcome unknown** | The answer to a write whose fate the leader cannot know (timeout, or it lost leadership). The entry may still be committed later. The client retries. |
 | **Redirect** | A follower answers client requests with `307 Temporary Redirect` and the leader's address in `Location`. |
+| **Linearizable read** | A read that returns the value of the latest write acknowledged before the read started, as if there were one copy of the data. |
+| **Stale read** | A read that returns an older value. A leader cut off in a minority would give stale reads if it answered from its own map. |
+| **ReadIndex** | How the leader serves linearizable reads: note the commit index, confirm leadership with a majority through one heartbeat round, wait until that index is applied, then read. |

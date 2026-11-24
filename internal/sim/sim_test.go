@@ -282,3 +282,42 @@ func TestReplicationUnderMessageLoss(t *testing.T) {
 		}
 	}
 }
+
+func TestPartitionedLeaderCannotConfirmReads(t *testing.T) {
+	c := New(Options{Seed: 7})
+	old := mustLeader(t, c)
+	index, _, _ := c.Propose(old, "x=1")
+	if err := c.RunUntil(200, func() bool { _, ok := c.Committed(index); return ok }); err != nil {
+		t.Fatal(err)
+	}
+	majority := others(c, old)
+
+	c.Partition([]string{old}, majority)
+	staleRead, err := c.ReadIndex(old)
+	if err != nil {
+		t.Fatalf("ReadIndex on the old leader: %v", err)
+	}
+	next := mustLeader(t, c, majority...)
+	c.Propose(next, "x=2")
+
+	var freshRead uint64
+	if err := c.RunUntil(200, func() bool {
+		if freshRead == 0 {
+			freshRead, _ = c.ReadIndex(next)
+		}
+		return freshRead != 0
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Run(300); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := c.ReadConfirmed(old, staleRead); ok {
+		t.Fatalf("old leader %s confirmed a read while cut off: it would have returned x=1 after x=2", old)
+	}
+	if _, ok := c.ReadConfirmed(next, freshRead); !ok {
+		t.Fatalf("new leader %s never confirmed its read", next)
+	}
+	t.Logf("timeline:\n%s", c.Timeline())
+}

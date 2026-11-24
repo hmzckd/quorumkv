@@ -43,6 +43,7 @@ type node struct {
 	restarts uint64
 	status   raft.Status
 	applied  uint64
+	reads    map[uint64]uint64
 }
 
 type disk struct {
@@ -107,6 +108,7 @@ func (c *Cluster) start(n *node) {
 	n.raft = r
 	n.up = true
 	n.applied = 0
+	n.reads = map[uint64]uint64{}
 	n.status = r.Status()
 }
 
@@ -190,6 +192,28 @@ func (c *Cluster) handleReady(n *node) {
 	for _, e := range rd.Committed {
 		c.apply(n, e)
 	}
+	for _, rs := range rd.ReadStates {
+		n.reads[rs.ID] = rs.Index
+		c.eventf("%s confirmed read #%d at index %d", n.id, rs.ID, rs.Index)
+	}
+}
+
+func (c *Cluster) ReadIndex(id string) (uint64, error) {
+	n := c.nodes[id]
+	if !n.up {
+		return 0, fmt.Errorf("%s is down", id)
+	}
+	readID, err := n.raft.ReadIndex()
+	if err == nil {
+		c.eventf("%s started read #%d, waiting for a majority to confirm it is still leader", id, readID)
+	}
+	c.handleReady(n)
+	return readID, err
+}
+
+func (c *Cluster) ReadConfirmed(id string, readID uint64) (uint64, bool) {
+	index, ok := c.nodes[id].reads[readID]
+	return index, ok
 }
 
 func (c *Cluster) persistEntries(n *node, entries []raft.Entry) {

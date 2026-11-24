@@ -17,6 +17,8 @@ var (
 	ErrStopped        = errors.New("node stopped")
 	ErrUnknownOutcome = errors.New("outcome unknown: the write may or may not have been applied, retry it")
 	ErrNotCommitted   = errors.New("the write was overwritten by a new leader and not applied, retry it")
+	ErrNotReady       = errors.New("the new leader has not committed its first entry yet, retry in a moment")
+	ErrTimeout        = errors.New("timed out waiting for a majority, retry")
 )
 
 type NotLeaderError struct {
@@ -39,6 +41,18 @@ type proposal struct {
 	data  []byte
 	term  uint64
 	reply chan error
+}
+
+type readRequest struct {
+	key   string
+	index uint64
+	reply chan readResult
+}
+
+type readResult struct {
+	value string
+	found bool
+	err   error
 }
 
 type Sender interface {
@@ -64,10 +78,15 @@ type Node struct {
 	kv        *kv.Store
 	inbox     chan raft.Message
 	proposals chan *proposal
+	reads     chan *readRequest
 	statusReq chan chan Status
 	done      chan struct{}
 	last      raft.Status
 	pending   map[uint64]*proposal
+	applied   uint64
+
+	waitingReads   map[uint64]*readRequest
+	confirmedReads []*readRequest
 }
 
 func New(cfg Config, sender Sender, logger *slog.Logger) (*Node, error) {
@@ -104,10 +123,13 @@ func New(cfg Config, sender Sender, logger *slog.Logger) (*Node, error) {
 		kv:        kv.New(),
 		inbox:     make(chan raft.Message, 4096),
 		proposals: make(chan *proposal),
+		reads:     make(chan *readRequest),
 		statusReq: make(chan chan Status),
 		done:      make(chan struct{}),
 		last:      core.Status(),
 		pending:   map[uint64]*proposal{},
+
+		waitingReads: map[uint64]*readRequest{},
 	}, nil
 }
 
@@ -156,6 +178,25 @@ func (n *Node) Propose(ctx context.Context, cmd kv.Command) error {
 	}
 }
 
+func (n *Node) Get(ctx context.Context, key string) (string, bool, error) {
+	r := &readRequest{key: key, reply: make(chan readResult, 1)}
+	select {
+	case n.reads <- r:
+	case <-n.done:
+		return "", false, ErrStopped
+	case <-ctx.Done():
+		return "", false, ErrTimeout
+	}
+	select {
+	case res := <-r.reply:
+		return res.value, res.found, res.err
+	case <-n.done:
+		return "", false, ErrStopped
+	case <-ctx.Done():
+		return "", false, ErrTimeout
+	}
+}
+
 func (n *Node) Run(ctx context.Context) error {
 	defer close(n.done)
 	defer n.store.Close()
@@ -173,6 +214,8 @@ func (n *Node) Run(ctx context.Context) error {
 			n.core.Step(m)
 		case p := <-n.proposals:
 			n.propose(p)
+		case r := <-n.reads:
+			n.read(r)
 		case reply := <-n.statusReq:
 			reply <- Status{Status: n.core.Status(), Keys: n.kv.Len()}
 		}
@@ -198,8 +241,43 @@ func (n *Node) handleReady() error {
 	for _, e := range rd.Committed {
 		n.apply(e)
 	}
+	for _, rs := range rd.ReadStates {
+		if r, ok := n.waitingReads[rs.ID]; ok {
+			delete(n.waitingReads, rs.ID)
+			r.index = rs.Index
+			n.confirmedReads = append(n.confirmedReads, r)
+		}
+	}
+	n.serveConfirmedReads()
 	n.logChanges()
 	return nil
+}
+
+func (n *Node) read(r *readRequest) {
+	id, err := n.core.ReadIndex()
+	switch {
+	case errors.Is(err, raft.ErrNotLeader):
+		r.reply <- readResult{err: &NotLeaderError{Leader: n.core.Status().Leader}}
+	case errors.Is(err, raft.ErrLeaderNotReady):
+		r.reply <- readResult{err: ErrNotReady}
+	case err != nil:
+		r.reply <- readResult{err: err}
+	default:
+		n.waitingReads[id] = r
+	}
+}
+
+func (n *Node) serveConfirmedReads() {
+	remaining := n.confirmedReads[:0]
+	for _, r := range n.confirmedReads {
+		if r.index > n.applied {
+			remaining = append(remaining, r)
+			continue
+		}
+		value, found := n.kv.Get(r.key)
+		r.reply <- readResult{value: value, found: found}
+	}
+	n.confirmedReads = remaining
 }
 
 func (n *Node) propose(p *proposal) {
@@ -216,6 +294,7 @@ func (n *Node) apply(e raft.Entry) {
 	if err := n.kv.Apply(e.Data); err != nil {
 		n.logger.Error("skipped entry that cannot be applied", "index", e.Index, "error", err)
 	}
+	n.applied = e.Index
 	p, ok := n.pending[e.Index]
 	if !ok {
 		return
@@ -242,6 +321,10 @@ func (n *Node) logChanges() {
 	}
 	if n.last.Role == raft.Leader && st.Role != raft.Leader {
 		n.failPending(ErrUnknownOutcome)
+		for id, r := range n.waitingReads {
+			r.reply <- readResult{err: &NotLeaderError{Leader: st.Leader}}
+			delete(n.waitingReads, id)
+		}
 	}
 	n.last = st
 }
