@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/hmzckd/quorumkv/internal/kv"
 	"github.com/hmzckd/quorumkv/internal/raft"
 )
 
@@ -20,6 +21,7 @@ type Options struct {
 	ElectionTicks  int
 	HeartbeatTicks int
 	SnapshotEvery  uint64
+	UnsafeReads    bool
 }
 
 type Cluster struct {
@@ -37,6 +39,10 @@ type Cluster struct {
 	commitIn  map[uint64]uint64
 	digests   map[uint64]uint64
 	failure   error
+
+	clock   int64
+	ops     []*clientOp
+	history []HistoryOp
 }
 
 type node struct {
@@ -48,6 +54,7 @@ type node struct {
 	status   raft.Status
 	applied  uint64
 	digest   uint64
+	kv       *kv.Store
 	reads    map[uint64]uint64
 }
 
@@ -114,9 +121,10 @@ func (c *Cluster) start(n *node) {
 	}
 	n.raft = r
 	n.up = true
-	n.applied, n.digest = 0, 0
+	n.applied, n.digest, n.kv = 0, 0, kv.New()
 	if snap := n.disk.snapshot; snap != nil {
-		n.applied, n.digest = snap.Index, decodeDigest(snap.Data)
+		n.applied = snap.Index
+		n.digest, n.kv = decodeState(snap.Data)
 	}
 	n.reads = map[uint64]uint64{}
 	n.status = r.Status()
@@ -206,7 +214,7 @@ func (c *Cluster) handleReady(n *node) {
 		c.apply(n, e)
 	}
 	if every := c.opts.SnapshotEvery; every > 0 && c.failure == nil && n.applied-n.raft.Status().SnapshotIndex >= every {
-		snap, err := n.raft.Compact(n.applied, encodeDigest(n.digest))
+		snap, err := n.raft.Compact(n.applied, encodeState(n.digest, n.kv))
 		if err != nil {
 			c.fail("%s compact: %v", n.id, err)
 			return
@@ -217,6 +225,7 @@ func (c *Cluster) handleReady(n *node) {
 		n.reads[rs.ID] = rs.Index
 		c.eventf("%s confirmed read #%d at index %d", n.id, rs.ID, rs.Index)
 	}
+	c.serveReads(n)
 }
 
 func (c *Cluster) ReadIndex(id string) (uint64, error) {
@@ -262,7 +271,8 @@ func (c *Cluster) keepAfter(n *node, snap raft.Snapshot) {
 
 func (c *Cluster) installSnapshot(n *node, snap raft.Snapshot) {
 	c.keepAfter(n, snap)
-	n.applied, n.digest = snap.Index, decodeDigest(snap.Data)
+	n.applied = snap.Index
+	n.digest, n.kv = decodeState(snap.Data)
 	if want, ok := c.digests[snap.Index]; ok && want != n.digest {
 		c.fail("%s installed a snapshot at index %d whose state differs from what other nodes applied", n.id, snap.Index)
 	}
@@ -278,15 +288,19 @@ func nextDigest(prev uint64, e raft.Entry) uint64 {
 	return h.Sum64()
 }
 
-func encodeDigest(d uint64) []byte {
-	return binary.BigEndian.AppendUint64(nil, d)
+func encodeState(digest uint64, store *kv.Store) []byte {
+	return append(binary.BigEndian.AppendUint64(nil, digest), store.Snapshot()...)
 }
 
-func decodeDigest(b []byte) uint64 {
-	if len(b) != 8 {
-		return 0
+func decodeState(b []byte) (uint64, *kv.Store) {
+	store := kv.New()
+	if len(b) < 8 {
+		return 0, store
 	}
-	return binary.BigEndian.Uint64(b)
+	if err := store.Restore(b[8:]); err != nil {
+		panic(err)
+	}
+	return binary.BigEndian.Uint64(b[:8]), store
 }
 
 func (c *Cluster) apply(n *node, e raft.Entry) {
@@ -299,6 +313,8 @@ func (c *Cluster) apply(n *node, e raft.Entry) {
 	}
 	n.applied = e.Index
 	n.digest = nextDigest(n.digest, e)
+	_ = n.kv.Apply(e.Data)
+	c.onApplied(n, e)
 	if want, ok := c.digests[e.Index]; ok && want != n.digest {
 		c.fail("%s has a different state after index %d than another node", n.id, e.Index)
 		return
@@ -377,6 +393,7 @@ func (c *Cluster) observe() {
 		}
 		n.status = st
 	}
+	c.expireOps()
 	if err := c.checkElectionSafety(); err != nil {
 		c.fail("%v", err)
 	}
@@ -443,6 +460,7 @@ func (c *Cluster) Crash(id string) {
 	n.up = false
 	n.raft = nil
 	c.eventf("crash %s", id)
+	c.abandonOps(func(op *clientOp) bool { return op.node == id })
 }
 
 func (c *Cluster) Restart(id string) {
