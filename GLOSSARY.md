@@ -45,3 +45,5 @@ Terms used in the code and the docs. Each term means exactly one thing.
 | **Snapshot** | The whole key-value map as of one log index, with that entry's term. Stored in the `snapshot` file. |
 | **Log compaction** | After applying `QK_SNAPSHOT_EVERY` entries, a node writes a snapshot and deletes the log entries it covers, so the log and the restart time stay small. |
 | **InstallSnapshot** | The message a leader sends instead of `AppendEntries` when a follower needs entries the leader already compacted away. The follower replaces its map with the snapshot. |
+| **Random fault test** | `TestRandomFaults`: 200 seeded runs in which nodes crash and restart, the network splits and heals and messages are lost, while every safety rule is checked after each tick. A failure prints the seed that replays it. |
+| **Liveness** | The cluster eventually makes progress again. Checked only after the faults stop: with the network healthy and all nodes up, a new write must be applied everywhere. |
