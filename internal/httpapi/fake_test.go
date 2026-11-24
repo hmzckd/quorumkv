@@ -36,7 +36,7 @@ func (f *fakeNode) Propose(_ context.Context, cmd kv.Command) error {
 }
 
 func handlerFor(f *fakeNode) http.Handler {
-	return NewHandler(quietLogger(), Options{NodeID: "n2", PeerURLs: map[string]string{"n1": "http://n1:7001"}}, f)
+	return NewHandler(quietLogger(), Options{NodeID: "n2", ClientURLs: map[string]string{"n1": "http://n1:7001"}}, f)
 }
 
 func (f *fakeNode) Deliver(m raft.Message) bool {

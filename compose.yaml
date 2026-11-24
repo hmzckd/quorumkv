@@ -1,0 +1,44 @@
+x-cluster-env: &cluster-env
+  QK_PEERS: n1=http://n1:7001,n2=http://n2:7001,n3=http://n3:7001
+  QK_CLIENT_URLS: n1=http://localhost:7001,n2=http://localhost:7002,n3=http://localhost:7003
+
+x-node: &node
+  build: .
+  image: quorumkv:local
+  restart: unless-stopped
+
+services:
+  n1:
+    <<: *node
+    environment:
+      <<: *cluster-env
+      QK_NODE_ID: n1
+    ports:
+      - "7001:7001"
+    volumes:
+      - n1-data:/data
+
+  n2:
+    <<: *node
+    environment:
+      <<: *cluster-env
+      QK_NODE_ID: n2
+    ports:
+      - "7002:7001"
+    volumes:
+      - n2-data:/data
+
+  n3:
+    <<: *node
+    environment:
+      <<: *cluster-env
+      QK_NODE_ID: n3
+    ports:
+      - "7003:7001"
+    volumes:
+      - n3-data:/data
+
+volumes:
+  n1-data:
+  n2-data:
+  n3-data:

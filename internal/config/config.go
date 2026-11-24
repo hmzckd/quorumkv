@@ -22,11 +22,12 @@ type Peer struct {
 }
 
 type Config struct {
-	NodeID   string
-	Peers    []Peer
-	Addr     string
-	DataDir  string
-	LogLevel slog.Level
+	NodeID     string
+	Peers      []Peer
+	ClientURLs map[string]string
+	Addr       string
+	DataDir    string
+	LogLevel   slog.Level
 
 	Heartbeat       time.Duration
 	ElectionTimeout time.Duration
@@ -51,6 +52,10 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("QK_PEERS must contain this node %q", cfg.NodeID)
 	}
 	cfg.Peers = peers
+
+	if cfg.ClientURLs, err = parseClientURLs(getenv("QK_CLIENT_URLS"), peers); err != nil {
+		return Config{}, fmt.Errorf("QK_CLIENT_URLS: %w", err)
+	}
 
 	cfg.DataDir = valueOr(getenv("QK_DATA_DIR"), filepath.Join("data", cfg.NodeID))
 
@@ -133,6 +138,31 @@ func parsePeers(raw string) ([]Peer, error) {
 
 	sort.Slice(peers, func(i, j int) bool { return peers[i].ID < peers[j].ID })
 	return peers, nil
+}
+
+func parseClientURLs(raw string, peers []Peer) (map[string]string, error) {
+	urls := map[string]string{}
+	if strings.TrimSpace(raw) == "" {
+		for _, p := range peers {
+			urls[p.ID] = p.URL
+		}
+		return urls, nil
+	}
+
+	clients, err := parsePeers(raw)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range clients {
+		if !containsID(peers, c.ID) {
+			return nil, fmt.Errorf("%q is not in QK_PEERS", c.ID)
+		}
+		urls[c.ID] = c.URL
+	}
+	if len(urls) != len(peers) {
+		return nil, fmt.Errorf("must list every node in QK_PEERS")
+	}
+	return urls, nil
 }
 
 func containsID(peers []Peer, id string) bool {

@@ -69,7 +69,7 @@ func run() error {
 	}
 
 	srv := &http.Server{
-		Handler:           httpapi.NewHandler(logger, httpapi.Options{NodeID: cfg.NodeID, PeerURLs: peerURLs}, n),
+		Handler:           httpapi.NewHandler(logger, httpapi.Options{NodeID: cfg.NodeID, ClientURLs: cfg.ClientURLs}, n),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

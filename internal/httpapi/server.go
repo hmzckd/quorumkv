@@ -22,9 +22,9 @@ type Node interface {
 }
 
 type Options struct {
-	NodeID   string
-	PeerURLs map[string]string
-	Timeout  time.Duration
+	NodeID     string
+	ClientURLs map[string]string
+	Timeout    time.Duration
 }
 
 func NewHandler(logger *slog.Logger, opts Options, n Node) http.Handler {

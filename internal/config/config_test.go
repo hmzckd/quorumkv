@@ -55,6 +55,33 @@ func TestLoadSortsPeersAndTrimsSlash(t *testing.T) {
 	}
 }
 
+func TestClientURLsDefaultToPeerURLs(t *testing.T) {
+	cfg, err := Load(env(map[string]string{"QK_NODE_ID": "n1", "QK_PEERS": threePeers}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ClientURLs["n3"] != "http://localhost:7003" {
+		t.Errorf("ClientURLs = %v, want the peer URLs", cfg.ClientURLs)
+	}
+}
+
+func TestClientURLsCanDifferFromPeerURLs(t *testing.T) {
+	cfg, err := Load(env(map[string]string{
+		"QK_NODE_ID":     "n1",
+		"QK_PEERS":       "n1=http://n1:7001,n2=http://n2:7001,n3=http://n3:7001",
+		"QK_CLIENT_URLS": "n1=http://localhost:7001,n2=http://localhost:7002,n3=http://localhost:7003/",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Peers[1].URL != "http://n2:7001" {
+		t.Errorf("peer URL = %q, want http://n2:7001", cfg.Peers[1].URL)
+	}
+	if cfg.ClientURLs["n2"] != "http://localhost:7002" || cfg.ClientURLs["n3"] != "http://localhost:7003" {
+		t.Errorf("ClientURLs = %v", cfg.ClientURLs)
+	}
+}
+
 func TestLoadRejectsBadInput(t *testing.T) {
 	cases := map[string]map[string]string{
 		"missing node id":    {"QK_PEERS": threePeers},
@@ -69,6 +96,8 @@ func TestLoadRejectsBadInput(t *testing.T) {
 		"heartbeat too fast": {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_HEARTBEAT": "5ms"},
 		"election too short": {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_ELECTION_TIMEOUT": "60ms"},
 		"zero snapshot":      {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_SNAPSHOT_EVERY": "0"},
+		"client url unknown": {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_CLIENT_URLS": "n1=http://a:1,n2=http://a:2,n9=http://a:3"},
+		"client url missing": {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_CLIENT_URLS": "n1=http://a:1,n2=http://a:2"},
 	}
 	for name, values := range cases {
 		t.Run(name, func(t *testing.T) {

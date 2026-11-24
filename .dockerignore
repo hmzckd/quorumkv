@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+.vscode
+docs
+*.md
+data
+/quorumkv
+/quorumkv.exe
+/qkdump
+/qkdump.exe
+*.test
+*.out

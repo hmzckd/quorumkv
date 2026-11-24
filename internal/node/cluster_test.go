@@ -99,7 +99,7 @@ func (c *testCluster) start(id string, l net.Listener) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &process{node: n, cancel: cancel, done: make(chan error, 1),
-		srv: &http.Server{Handler: httpapi.NewHandler(logger, httpapi.Options{NodeID: id, PeerURLs: c.urls, Timeout: c.writeTimeout}, n)}}
+		srv: &http.Server{Handler: httpapi.NewHandler(logger, httpapi.Options{NodeID: id, ClientURLs: c.urls, Timeout: c.writeTimeout}, n)}}
 	tr.Start(ctx)
 	go func() { p.done <- n.Run(ctx) }()
 	go p.srv.Serve(l)

@@ -78,7 +78,7 @@ func writeError(w http.ResponseWriter, r *http.Request, opts Options, err error)
 	var notLeader *node.NotLeaderError
 	switch {
 	case errors.As(err, &notLeader) && notLeader.Leader != "":
-		target, ok := opts.PeerURLs[notLeader.Leader]
+		target, ok := opts.ClientURLs[notLeader.Leader]
 		if !ok {
 			writeProblem(w, http.StatusServiceUnavailable, "Leader unreachable", err.Error())
 			return
