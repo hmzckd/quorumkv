@@ -42,3 +42,6 @@ Terms used in the code and the docs. Each term means exactly one thing.
 | **Linearizable read** | A read that returns the value of the latest write acknowledged before the read started, as if there were one copy of the data. |
 | **Stale read** | A read that returns an older value. A leader cut off in a minority would give stale reads if it answered from its own map. |
 | **ReadIndex** | How the leader serves linearizable reads: note the commit index, confirm leadership with a majority through one heartbeat round, wait until that index is applied, then read. |
+| **Snapshot** | The whole key-value map as of one log index, with that entry's term. Stored in the `snapshot` file. |
+| **Log compaction** | After applying `QK_SNAPSHOT_EVERY` entries, a node writes a snapshot and deletes the log entries it covers, so the log and the restart time stay small. |
+| **InstallSnapshot** | The message a leader sends instead of `AppendEntries` when a follower needs entries the leader already compacted away. The follower replaces its map with the snapshot. |

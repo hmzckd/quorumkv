@@ -56,3 +56,22 @@ func TestBadCommandsAreRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestSnapshotRestoresTheSameMap(t *testing.T) {
+	a := New()
+	a.Apply(Command{Op: OpPut, Key: "x", Value: "1"}.Encode())
+	a.Apply(Command{Op: OpPut, Key: "y", Value: "2"}.Encode())
+
+	b := New()
+	b.Apply(Command{Op: OpPut, Key: "stale", Value: "old"}.Encode())
+	if err := b.Restore(a.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+
+	if v, _ := b.Get("y"); v != "2" || b.Len() != 2 {
+		t.Fatalf("restored map: y=%q len=%d, want y=2 len=2", v, b.Len())
+	}
+	if _, ok := b.Get("stale"); ok {
+		t.Error("restore kept a key that was not in the snapshot")
+	}
+}

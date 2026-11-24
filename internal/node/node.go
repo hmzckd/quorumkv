@@ -66,6 +66,7 @@ type Config struct {
 	Tick           time.Duration
 	ElectionTicks  int
 	HeartbeatTicks int
+	SnapshotEvery  uint64
 }
 
 type Node struct {
@@ -84,6 +85,9 @@ type Node struct {
 	last      raft.Status
 	pending   map[uint64]*proposal
 	applied   uint64
+
+	snapshotEvery uint64
+	snapshotIndex uint64
 
 	waitingReads   map[uint64]*readRequest
 	confirmedReads []*readRequest
@@ -105,13 +109,25 @@ func New(cfg Config, sender Sender, logger *slog.Logger) (*Node, error) {
 		ElectionTicks:  cfg.ElectionTicks,
 		HeartbeatTicks: cfg.HeartbeatTicks,
 		Rand:           rand.New(rand.NewPCG(seed, seed>>1)),
-	}, raft.State{HardState: loaded.HardState, Entries: loaded.Entries})
+	}, raft.State{HardState: loaded.HardState, Snapshot: loaded.Snapshot, Entries: loaded.Entries})
 	if err != nil {
 		store.Close()
 		return nil, err
 	}
+	machine := kv.New()
+	var snapIndex uint64
+	if loaded.Snapshot != nil {
+		if err := machine.Restore(loaded.Snapshot.Data); err != nil {
+			store.Close()
+			return nil, err
+		}
+		snapIndex = loaded.Snapshot.Index
+	}
 	logger.Info("loaded from disk", "term", loaded.HardState.Term, "voted_for", loaded.HardState.VotedFor,
-		"entries", len(loaded.Entries))
+		"snapshot_index", snapIndex, "entries", len(loaded.Entries))
+	if cfg.SnapshotEvery == 0 {
+		cfg.SnapshotEvery = 1000
+	}
 
 	return &Node{
 		id:        cfg.ID,
@@ -120,7 +136,7 @@ func New(cfg Config, sender Sender, logger *slog.Logger) (*Node, error) {
 		store:     store,
 		sender:    sender,
 		logger:    logger,
-		kv:        kv.New(),
+		kv:        machine,
 		inbox:     make(chan raft.Message, 4096),
 		proposals: make(chan *proposal),
 		reads:     make(chan *readRequest),
@@ -129,7 +145,10 @@ func New(cfg Config, sender Sender, logger *slog.Logger) (*Node, error) {
 		last:      core.Status(),
 		pending:   map[uint64]*proposal{},
 
-		waitingReads: map[uint64]*readRequest{},
+		waitingReads:  map[uint64]*readRequest{},
+		applied:       snapIndex,
+		snapshotEvery: cfg.SnapshotEvery,
+		snapshotIndex: snapIndex,
 	}, nil
 }
 
@@ -232,6 +251,11 @@ func (n *Node) handleReady() error {
 			return fmt.Errorf("save hard state: %w", err)
 		}
 	}
+	if rd.Snapshot != nil {
+		if err := n.installSnapshot(*rd.Snapshot); err != nil {
+			return err
+		}
+	}
 	if len(rd.Entries) > 0 {
 		if err := n.store.Append(rd.Entries); err != nil {
 			return fmt.Errorf("append to log: %w", err)
@@ -240,6 +264,11 @@ func (n *Node) handleReady() error {
 	n.sender.Send(rd.Messages)
 	for _, e := range rd.Committed {
 		n.apply(e)
+	}
+	if n.applied-n.snapshotIndex >= n.snapshotEvery {
+		if err := n.takeSnapshot(); err != nil {
+			return err
+		}
 	}
 	for _, rs := range rd.ReadStates {
 		if r, ok := n.waitingReads[rs.ID]; ok {
@@ -250,6 +279,32 @@ func (n *Node) handleReady() error {
 	}
 	n.serveConfirmedReads()
 	n.logChanges()
+	return nil
+}
+
+func (n *Node) installSnapshot(snap raft.Snapshot) error {
+	if err := n.store.SaveSnapshot(snap); err != nil {
+		return fmt.Errorf("save received snapshot: %w", err)
+	}
+	if err := n.kv.Restore(snap.Data); err != nil {
+		return err
+	}
+	n.applied = snap.Index
+	n.snapshotIndex = snap.Index
+	n.logger.Info("installed snapshot from leader", "index", snap.Index, "term", snap.Term, "keys", n.kv.Len())
+	return nil
+}
+
+func (n *Node) takeSnapshot() error {
+	snap, err := n.core.Compact(n.applied, n.kv.Snapshot())
+	if err != nil {
+		return err
+	}
+	if err := n.store.SaveSnapshot(snap); err != nil {
+		return fmt.Errorf("save snapshot: %w", err)
+	}
+	n.snapshotIndex = snap.Index
+	n.logger.Info("took snapshot", "index", snap.Index, "keys", n.kv.Len())
 	return nil
 }
 

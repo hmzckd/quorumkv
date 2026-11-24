@@ -7,12 +7,19 @@ const (
 	MsgVoteResp MsgType = "RequestVoteResponse"
 	MsgApp      MsgType = "AppendEntries"
 	MsgAppResp  MsgType = "AppendEntriesResponse"
+	MsgSnap     MsgType = "InstallSnapshot"
 )
 
 type Entry struct {
 	Term  uint64 `json:"term"`
 	Index uint64 `json:"index"`
 	Data  []byte `json:"data,omitempty"`
+}
+
+type Snapshot struct {
+	Index uint64 `json:"index"`
+	Term  uint64 `json:"term"`
+	Data  []byte `json:"data"`
 }
 
 type Message struct {
@@ -35,4 +42,6 @@ type Message struct {
 	RejectHint uint64 `json:"rejectHint,omitempty"`
 
 	ReadContext uint64 `json:"readContext,omitempty"`
+
+	Snapshot *Snapshot `json:"snapshot,omitempty"`
 }

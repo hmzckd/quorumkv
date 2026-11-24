@@ -57,6 +57,7 @@ func run() error {
 		Tick:           config.Tick,
 		ElectionTicks:  cfg.ElectionTicks(),
 		HeartbeatTicks: cfg.HeartbeatTicks(),
+		SnapshotEvery:  cfg.SnapshotEvery,
 	}, tr, logger)
 	if err != nil {
 		return err

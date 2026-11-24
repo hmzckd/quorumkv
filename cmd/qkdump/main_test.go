@@ -28,7 +28,7 @@ func TestDumpShowsStateEntriesAndDamage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, want := range []string{`term=3 votedFor="n2"`, "(no-op)", `{"op":"put"}`, "damaged tail: 5 bytes"} {
+	for _, want := range []string{`term=3 votedFor="n2"`, "snapshot: (none)", "(no-op)", `{"op":"put"}`, "damaged tail: 5 bytes"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, out.String())
 		}

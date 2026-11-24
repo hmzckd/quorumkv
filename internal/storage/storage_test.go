@@ -215,3 +215,61 @@ func TestStorageFeedsRaft(t *testing.T) {
 		t.Fatalf("status = %+v, want term 2 and last index 4", st)
 	}
 }
+
+func TestSnapshotShortensTheLog(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := open(t, dir)
+	if err := s.Append(entries(1, 1, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveSnapshot(raft.Snapshot{Index: 7, Term: 1, Data: []byte(`{"x":"1"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(entries(1, 11, 12)); err != nil {
+		t.Fatalf("append after snapshot: %v", err)
+	}
+
+	_, loaded := reopen(t, s, dir)
+
+	if loaded.Snapshot == nil || loaded.Snapshot.Index != 7 || string(loaded.Snapshot.Data) != `{"x":"1"}` {
+		t.Fatalf("snapshot = %+v", loaded.Snapshot)
+	}
+	if got := indexes(loaded.Entries); len(got) != 5 || got[0] != 8 || got[4] != 12 {
+		t.Fatalf("entries = %v, want 8..12", got)
+	}
+}
+
+func TestCrashBetweenSnapshotAndLogRewrite(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := open(t, dir)
+	if err := s.Append(entries(1, 1, 10)); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if err := os.WriteFile(filepath.Join(dir, "snapshot"), []byte(`{"index":6,"term":1,"data":null}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, loaded := open(t, dir)
+
+	if got := indexes(loaded.Entries); len(got) != 4 || got[0] != 7 {
+		t.Fatalf("entries = %v, want 7..10: entries inside the snapshot must be dropped", got)
+	}
+}
+
+func TestSnapshotWithDifferentTermDropsTheWholeLog(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := open(t, dir)
+	if err := s.Append(entries(1, 1, 5)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveSnapshot(raft.Snapshot{Index: 3, Term: 2}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, loaded := reopen(t, s, dir)
+
+	if len(loaded.Entries) != 0 {
+		t.Fatalf("entries = %v, want none: they belong to a history the leader replaced", indexes(loaded.Entries))
+	}
+}

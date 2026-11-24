@@ -30,6 +30,9 @@ func TestLoadDefaults(t *testing.T) {
 	if len(cfg.Peers) != 3 || cfg.Peers[1] != (Peer{ID: "n2", URL: "http://localhost:7002"}) {
 		t.Errorf("Peers = %+v", cfg.Peers)
 	}
+	if cfg.SnapshotEvery != 1000 {
+		t.Errorf("SnapshotEvery = %d, want 1000", cfg.SnapshotEvery)
+	}
 	if cfg.HeartbeatTicks() != 5 || cfg.ElectionTicks() != 15 {
 		t.Errorf("ticks = heartbeat %d, election %d, want 5 and 15", cfg.HeartbeatTicks(), cfg.ElectionTicks())
 	}
@@ -65,6 +68,7 @@ func TestLoadRejectsBadInput(t *testing.T) {
 		"bad heartbeat":      {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_HEARTBEAT": "fast"},
 		"heartbeat too fast": {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_HEARTBEAT": "5ms"},
 		"election too short": {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_ELECTION_TIMEOUT": "60ms"},
+		"zero snapshot":      {"QK_NODE_ID": "n1", "QK_PEERS": threePeers, "QK_SNAPSHOT_EVERY": "0"},
 	}
 	for name, values := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -25,7 +25,8 @@ type testCluster struct {
 	dirs  map[string]string
 	procs map[string]*process
 
-	writeTimeout time.Duration
+	writeTimeout  time.Duration
+	snapshotEvery uint64
 }
 
 type process struct {
@@ -42,8 +43,13 @@ func startCluster(t *testing.T, size int) *testCluster {
 
 func startClusterWith(t *testing.T, size int, writeTimeout time.Duration) *testCluster {
 	t.Helper()
+	return startClusterOpts(t, size, writeTimeout, 0)
+}
+
+func startClusterOpts(t *testing.T, size int, writeTimeout time.Duration, snapshotEvery uint64) *testCluster {
+	t.Helper()
 	c := &testCluster{t: t, urls: map[string]string{}, addrs: map[string]string{}, dirs: map[string]string{},
-		procs: map[string]*process{}, writeTimeout: writeTimeout}
+		procs: map[string]*process{}, writeTimeout: writeTimeout, snapshotEvery: snapshotEvery}
 	listeners := map[string]net.Listener{}
 	for i := 1; i <= size; i++ {
 		id := fmt.Sprintf("n%d", i)
@@ -86,7 +92,7 @@ func (c *testCluster) start(id string, l net.Listener) {
 	tr := transport.NewHTTP(peers, logger)
 	n, err := node.New(node.Config{
 		ID: id, Peers: c.ids, DataDir: c.dirs[id],
-		Tick: 10 * time.Millisecond, ElectionTicks: 15, HeartbeatTicks: 5,
+		Tick: 10 * time.Millisecond, ElectionTicks: 15, HeartbeatTicks: 5, SnapshotEvery: c.snapshotEvery,
 	}, tr, logger)
 	if err != nil {
 		c.t.Fatalf("node.New(%s): %v", id, err)

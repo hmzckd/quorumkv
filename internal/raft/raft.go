@@ -29,6 +29,7 @@ type HardState struct {
 
 type State struct {
 	HardState HardState
+	Snapshot  *Snapshot
 	Entries   []Entry
 }
 
@@ -42,6 +43,7 @@ type Config struct {
 
 type Ready struct {
 	HardState  *HardState
+	Snapshot   *Snapshot
 	Entries    []Entry
 	Committed  []Entry
 	Messages   []Message
@@ -60,13 +62,14 @@ type pendingRead struct {
 }
 
 type Status struct {
-	ID          string `json:"id"`
-	Role        Role   `json:"role"`
-	Term        uint64 `json:"term"`
-	Leader      string `json:"leader"`
-	LastIndex   uint64 `json:"lastIndex"`
-	CommitIndex uint64 `json:"commitIndex"`
-	Applied     uint64 `json:"applied"`
+	ID            string `json:"id"`
+	Role          Role   `json:"role"`
+	Term          uint64 `json:"term"`
+	Leader        string `json:"leader"`
+	LastIndex     uint64 `json:"lastIndex"`
+	CommitIndex   uint64 `json:"commitIndex"`
+	Applied       uint64 `json:"applied"`
+	SnapshotIndex uint64 `json:"snapshotIndex"`
 }
 
 type Raft struct {
@@ -87,6 +90,8 @@ type Raft struct {
 	offsetTerm  uint64
 	commitIndex uint64
 	applied     uint64
+	snapshot    *Snapshot
+	newSnapshot *Snapshot
 
 	nextIndex  map[string]uint64
 	matchIndex map[string]uint64
@@ -114,9 +119,13 @@ func New(cfg Config, st State) (*Raft, error) {
 	if cfg.Rand == nil {
 		return nil, errors.New("Rand is required")
 	}
+	var offset, offsetTerm uint64
+	if st.Snapshot != nil {
+		offset, offsetTerm = st.Snapshot.Index, st.Snapshot.Term
+	}
 	for i, e := range st.Entries {
-		if e.Index != uint64(i)+1 {
-			return nil, fmt.Errorf("entry %d has index %d, want %d", i, e.Index, i+1)
+		if e.Index != offset+uint64(i)+1 {
+			return nil, fmt.Errorf("entry %d has index %d, want %d", i, e.Index, offset+uint64(i)+1)
 		}
 	}
 
@@ -133,6 +142,11 @@ func New(cfg Config, st State) (*Raft, error) {
 		votedFor:       st.HardState.VotedFor,
 		role:           Follower,
 		log:            slices.Clone(st.Entries),
+		offset:         offset,
+		offsetTerm:     offsetTerm,
+		commitIndex:    offset,
+		applied:        offset,
+		snapshot:       st.Snapshot,
 	}
 	r.resetElectionTimer()
 	return r, nil
@@ -140,13 +154,14 @@ func New(cfg Config, st State) (*Raft, error) {
 
 func (r *Raft) Status() Status {
 	return Status{
-		ID:          r.id,
-		Role:        r.role,
-		Term:        r.term,
-		Leader:      r.leader,
-		LastIndex:   r.lastIndex(),
-		CommitIndex: r.commitIndex,
-		Applied:     r.applied,
+		ID:            r.id,
+		Role:          r.role,
+		Term:          r.term,
+		Leader:        r.leader,
+		LastIndex:     r.lastIndex(),
+		CommitIndex:   r.commitIndex,
+		Applied:       r.applied,
+		SnapshotIndex: r.offset,
 	}
 }
 
@@ -156,6 +171,8 @@ func (r *Raft) Ready() Ready {
 		rd.HardState = &HardState{Term: r.term, VotedFor: r.votedFor}
 		r.hardStateChanged = false
 	}
+	rd.Snapshot = r.newSnapshot
+	r.newSnapshot = nil
 	if r.unstableFrom != 0 {
 		rd.Entries = r.entriesFrom(r.unstableFrom, 0)
 		r.unstableFrom = 0
@@ -169,6 +186,18 @@ func (r *Raft) Ready() Ready {
 	rd.ReadStates = r.readyReads
 	r.readyReads = nil
 	return rd
+}
+
+func (r *Raft) Compact(index uint64, data []byte) (Snapshot, error) {
+	if index <= r.offset || index > r.applied {
+		return Snapshot{}, fmt.Errorf("cannot compact to %d: snapshot at %d, applied %d", index, r.offset, r.applied)
+	}
+	term, _ := r.termAt(index)
+	snap := Snapshot{Index: index, Term: term, Data: data}
+	r.log = slices.Clone(r.log[index-r.offset:])
+	r.offset, r.offsetTerm = index, term
+	r.snapshot = &snap
+	return snap, nil
 }
 
 func (r *Raft) ReadIndex() (uint64, error) {
@@ -242,7 +271,7 @@ func (r *Raft) Step(m Message) {
 	switch {
 	case m.Term > r.term:
 		leader := ""
-		if m.Type == MsgApp {
+		if m.Type == MsgApp || m.Type == MsgSnap {
 			leader = m.From
 		}
 		r.becomeFollower(m.Term, leader)
@@ -250,7 +279,7 @@ func (r *Raft) Step(m Message) {
 		switch m.Type {
 		case MsgVote:
 			r.send(Message{Type: MsgVoteResp, To: m.From, Granted: false})
-		case MsgApp:
+		case MsgApp, MsgSnap:
 			r.send(Message{Type: MsgAppResp, To: m.From, Success: false, RejectHint: r.lastIndex()})
 		}
 		return
@@ -265,7 +294,37 @@ func (r *Raft) Step(m Message) {
 		r.handleAppend(m)
 	case MsgAppResp:
 		r.handleAppendResponse(m)
+	case MsgSnap:
+		r.handleSnapshot(m)
 	}
+}
+
+func (r *Raft) handleSnapshot(m Message) {
+	if r.role != Follower {
+		r.becomeFollower(r.term, m.From)
+	}
+	r.leader = m.From
+	r.electionElapsed = 0
+
+	snap := m.Snapshot
+	if snap == nil || snap.Index <= r.commitIndex {
+		r.send(Message{Type: MsgAppResp, To: m.From, Success: true, MatchIndex: r.commitIndex, ReadContext: m.ReadContext})
+		return
+	}
+
+	if t, ok := r.termAt(snap.Index); ok && t == snap.Term {
+		r.log = slices.Clone(r.log[snap.Index-r.offset:])
+	} else {
+		r.log = nil
+	}
+	r.offset, r.offsetTerm = snap.Index, snap.Term
+	r.commitIndex, r.applied = snap.Index, snap.Index
+	r.snapshot = snap
+	r.newSnapshot = snap
+	if r.unstableFrom != 0 && r.unstableFrom <= snap.Index {
+		r.unstableFrom = 0
+	}
+	r.send(Message{Type: MsgAppResp, To: m.From, Success: true, MatchIndex: snap.Index, ReadContext: m.ReadContext})
 }
 
 func (r *Raft) campaign() {
@@ -432,6 +491,10 @@ func (r *Raft) broadcastAppend() {
 
 func (r *Raft) sendAppend(to string) {
 	prev := r.nextIndex[to] - 1
+	if prev < r.offset {
+		r.send(Message{Type: MsgSnap, To: to, Snapshot: r.snapshot, ReadContext: r.readSeq})
+		return
+	}
 	prevTerm, _ := r.termAt(prev)
 	r.send(Message{
 		Type:         MsgApp,

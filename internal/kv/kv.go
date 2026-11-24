@@ -61,3 +61,20 @@ func (s *Store) Get(key string) (string, bool) {
 func (s *Store) Len() int {
 	return len(s.data)
 }
+
+func (s *Store) Snapshot() []byte {
+	data, err := json.Marshal(s.data)
+	if err != nil {
+		panic(err)
+	}
+	return data
+}
+
+func (s *Store) Restore(snapshot []byte) error {
+	data := map[string]string{}
+	if err := json.Unmarshal(snapshot, &data); err != nil {
+		return fmt.Errorf("restore snapshot: %w", err)
+	}
+	s.data = data
+	return nil
+}

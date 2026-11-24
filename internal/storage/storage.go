@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	stateFile = "state"
-	logFile   = "log"
+	stateFile    = "state"
+	logFile      = "log"
+	snapshotFile = "snapshot"
 )
 
 type Storage struct {
@@ -26,6 +27,7 @@ type Storage struct {
 
 type Loaded struct {
 	HardState    raft.HardState
+	Snapshot     *raft.Snapshot
 	Entries      []raft.Entry
 	CutBytes     int64
 	CutReason    string
@@ -49,6 +51,12 @@ func Open(dir string) (*Storage, Loaded, error) {
 			return nil, Loaded{}, fmt.Errorf("state file is damaged: %w", err)
 		}
 	}
+
+	snap, err := readSnapshot(dir)
+	if err != nil {
+		return nil, Loaded{}, err
+	}
+	loaded.Snapshot = snap
 
 	path := filepath.Join(dir, logFile)
 	lf, err := ReadLog(path)
@@ -77,7 +85,98 @@ func Open(dir string) (*Storage, Loaded, error) {
 		s.firstIndex = lf.Entries[0].Index
 	}
 	loaded.Entries = lf.Entries
+
+	if snap != nil && len(lf.Entries) > 0 && s.firstIndex <= snap.Index {
+		if err := s.dropUpTo(*snap, lf.Entries); err != nil {
+			s.Close()
+			return nil, Loaded{}, err
+		}
+		loaded.Entries = entriesAfter(*snap, lf.Entries)
+	}
+	if snap != nil && len(loaded.Entries) > 0 && loaded.Entries[0].Index != snap.Index+1 {
+		s.Close()
+		return nil, Loaded{}, fmt.Errorf("log starts at %d but snapshot ends at %d", loaded.Entries[0].Index, snap.Index)
+	}
 	return s, loaded, nil
+}
+
+func (s *Storage) SaveSnapshot(snap raft.Snapshot) error {
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(s.dir, snapshotFile, data); err != nil {
+		return err
+	}
+	if len(s.offsets) == 0 || s.firstIndex > snap.Index {
+		return nil
+	}
+	lf, err := ReadLog(filepath.Join(s.dir, logFile))
+	if err != nil {
+		return err
+	}
+	return s.dropUpTo(snap, lf.Entries)
+}
+
+func entriesAfter(snap raft.Snapshot, entries []raft.Entry) []raft.Entry {
+	for i, e := range entries {
+		if e.Index == snap.Index {
+			if e.Term != snap.Term {
+				return nil
+			}
+			return entries[i+1:]
+		}
+	}
+	return nil
+}
+
+func (s *Storage) dropUpTo(snap raft.Snapshot, entries []raft.Entry) error {
+	keep := entriesAfter(snap, entries)
+	start := s.size
+	if len(keep) > 0 {
+		start = s.offsets[keep[0].Index-s.firstIndex]
+	}
+
+	raw, err := os.ReadFile(filepath.Join(s.dir, logFile))
+	if err != nil {
+		return err
+	}
+	kept := raw[start:s.size]
+	if err := writeFileAtomic(s.dir, logFile, kept); err != nil {
+		return err
+	}
+	if err := s.log.Close(); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(s.dir, logFile), os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	s.log = f
+
+	offsets := make([]int64, len(keep))
+	for i := range keep {
+		offsets[i] = s.offsets[keep[i].Index-s.firstIndex] - start
+	}
+	s.offsets = offsets
+	s.size = int64(len(kept))
+	s.firstIndex = snap.Index + 1
+	return nil
+}
+
+func readSnapshot(dir string) (*raft.Snapshot, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, snapshotFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var snap raft.Snapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, fmt.Errorf("snapshot file is damaged: %w", err)
+	}
+	return &snap, nil
 }
 
 func (s *Storage) SaveHardState(hs raft.HardState) error {

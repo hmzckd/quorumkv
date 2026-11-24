@@ -38,6 +38,20 @@ func dump(w io.Writer, dir string) error {
 		fmt.Fprintf(w, "state: term=%d votedFor=%q\n", hs.Term, hs.VotedFor)
 	}
 
+	raw, err = os.ReadFile(filepath.Join(dir, "snapshot"))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		fmt.Fprintln(w, "snapshot: (none)")
+	case err != nil:
+		return err
+	default:
+		var snap raft.Snapshot
+		if err := json.Unmarshal(raw, &snap); err != nil {
+			return fmt.Errorf("snapshot: %w", err)
+		}
+		fmt.Fprintf(w, "snapshot: up to index %d (term %d), %d bytes of state\n", snap.Index, snap.Term, len(snap.Data))
+	}
+
 	lf, err := storage.ReadLog(filepath.Join(dir, "log"))
 	if err != nil {
 		return err

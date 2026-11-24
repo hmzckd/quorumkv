@@ -321,3 +321,65 @@ func TestPartitionedLeaderCannotConfirmReads(t *testing.T) {
 	}
 	t.Logf("timeline:\n%s", c.Timeline())
 }
+
+func TestCrashedFollowerCatchesUpThroughSnapshot(t *testing.T) {
+	c := New(Options{Seed: 21, SnapshotEvery: 10})
+	leader := mustLeader(t, c)
+	lagging := others(c, leader)[0]
+	c.Crash(lagging)
+
+	var last uint64
+	for i := 0; i < 50; i++ {
+		last, _, _ = c.Propose(leader, fmt.Sprintf("v%d", i))
+		if err := c.Run(2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.RunUntil(200, func() bool { return c.Status(leader).CommitIndex >= last }); err != nil {
+		t.Fatal(err)
+	}
+
+	c.Restart(lagging)
+	if err := c.RunUntil(500, func() bool { return c.nodes[lagging].applied >= last }); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Run(50); err != nil {
+		t.Fatal(err)
+	}
+
+	installed := false
+	for _, e := range c.Events() {
+		installed = installed || strings.Contains(e, lagging+" installed snapshot")
+	}
+	if !installed {
+		t.Fatalf("%s caught up without a snapshot:\n%s", lagging, c.Timeline())
+	}
+	if c.nodes[lagging].digest != c.nodes[leader].digest {
+		t.Fatal("follower state differs from leader after the snapshot")
+	}
+}
+
+func TestSnapshotsUnderMessageLossAndCrashes(t *testing.T) {
+	for seed := uint64(1); seed <= 20; seed++ {
+		c := New(Options{Seed: seed, SnapshotEvery: 7, DropRate: 0.1, MaxDelay: 5})
+		for round := 0; round < 60; round++ {
+			if leader, _ := c.LeaderOfHighestTerm(); leader != "" {
+				c.Propose(leader, fmt.Sprintf("v%d", round))
+			}
+			if round%15 == 7 {
+				victim := c.IDs()[round%3]
+				c.Crash(victim)
+				if err := c.Run(40); err != nil {
+					t.Fatal(err)
+				}
+				c.Restart(victim)
+			}
+			if err := c.Run(10); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := c.Run(300); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

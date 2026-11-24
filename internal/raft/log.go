@@ -23,7 +23,7 @@ func (r *Raft) termAt(i uint64) (uint64, bool) {
 }
 
 func (r *Raft) entriesFrom(from uint64, max int) []Entry {
-	if from > r.lastIndex() {
+	if from > r.lastIndex() || from <= r.offset {
 		return nil
 	}
 	start := from - r.offset - 1

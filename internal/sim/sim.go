@@ -1,7 +1,9 @@
 package sim
 
 import (
+	"encoding/binary"
 	"fmt"
+	"hash/fnv"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -17,6 +19,7 @@ type Options struct {
 	MaxDelay       int
 	ElectionTicks  int
 	HeartbeatTicks int
+	SnapshotEvery  uint64
 }
 
 type Cluster struct {
@@ -32,6 +35,7 @@ type Cluster struct {
 	leaders   map[uint64]string
 	committed map[uint64]raft.Entry
 	commitIn  map[uint64]uint64
+	digests   map[uint64]uint64
 	failure   error
 }
 
@@ -43,11 +47,13 @@ type node struct {
 	restarts uint64
 	status   raft.Status
 	applied  uint64
+	digest   uint64
 	reads    map[uint64]uint64
 }
 
 type disk struct {
 	hardState raft.HardState
+	snapshot  *raft.Snapshot
 	entries   []raft.Entry
 }
 
@@ -82,6 +88,7 @@ func New(opts Options) *Cluster {
 		leaders:   map[uint64]string{},
 		committed: map[uint64]raft.Entry{},
 		commitIn:  map[uint64]uint64{},
+		digests:   map[uint64]uint64{},
 	}
 	for i := 1; i <= opts.Nodes; i++ {
 		c.ids = append(c.ids, fmt.Sprintf("n%d", i))
@@ -101,13 +108,16 @@ func (c *Cluster) start(n *node) {
 		ElectionTicks:  c.opts.ElectionTicks,
 		HeartbeatTicks: c.opts.HeartbeatTicks,
 		Rand:           rand.New(rand.NewPCG(c.opts.Seed, uint64(slices.Index(c.ids, n.id)+1)<<16|n.restarts)),
-	}, raft.State{HardState: n.disk.hardState, Entries: n.disk.entries})
+	}, raft.State{HardState: n.disk.hardState, Snapshot: n.disk.snapshot, Entries: n.disk.entries})
 	if err != nil {
 		panic(err)
 	}
 	n.raft = r
 	n.up = true
-	n.applied = 0
+	n.applied, n.digest = 0, 0
+	if snap := n.disk.snapshot; snap != nil {
+		n.applied, n.digest = snap.Index, decodeDigest(snap.Data)
+	}
 	n.reads = map[uint64]uint64{}
 	n.status = r.Status()
 }
@@ -183,6 +193,9 @@ func (c *Cluster) handleReady(n *node) {
 	if rd.HardState != nil {
 		n.disk.hardState = *rd.HardState
 	}
+	if rd.Snapshot != nil {
+		c.installSnapshot(n, *rd.Snapshot)
+	}
 	if len(rd.Entries) > 0 {
 		c.persistEntries(n, rd.Entries)
 	}
@@ -191,6 +204,14 @@ func (c *Cluster) handleReady(n *node) {
 	}
 	for _, e := range rd.Committed {
 		c.apply(n, e)
+	}
+	if every := c.opts.SnapshotEvery; every > 0 && c.failure == nil && n.applied-n.raft.Status().SnapshotIndex >= every {
+		snap, err := n.raft.Compact(n.applied, encodeDigest(n.digest))
+		if err != nil {
+			c.fail("%s compact: %v", n.id, err)
+			return
+		}
+		c.keepAfter(n, snap)
 	}
 	for _, rs := range rd.ReadStates {
 		n.reads[rs.ID] = rs.Index
@@ -218,11 +239,54 @@ func (c *Cluster) ReadConfirmed(id string, readID uint64) (uint64, bool) {
 
 func (c *Cluster) persistEntries(n *node, entries []raft.Entry) {
 	first := entries[0].Index
-	if last := uint64(len(n.disk.entries)); first <= last {
-		c.eventf("%s overwrote its log from index %d (had %d entries)", n.id, first, last)
-		n.disk.entries = n.disk.entries[:first-1]
+	for i, e := range n.disk.entries {
+		if e.Index == first {
+			c.eventf("%s overwrote its log from index %d (had %d entries)", n.id, first, n.disk.entries[len(n.disk.entries)-1].Index)
+			n.disk.entries = n.disk.entries[:i]
+			break
+		}
 	}
 	n.disk.entries = append(n.disk.entries, entries...)
+}
+
+func (c *Cluster) keepAfter(n *node, snap raft.Snapshot) {
+	var keep []raft.Entry
+	for i, e := range n.disk.entries {
+		if e.Index == snap.Index && e.Term == snap.Term {
+			keep = slices.Clone(n.disk.entries[i+1:])
+		}
+	}
+	n.disk.snapshot = &snap
+	n.disk.entries = keep
+}
+
+func (c *Cluster) installSnapshot(n *node, snap raft.Snapshot) {
+	c.keepAfter(n, snap)
+	n.applied, n.digest = snap.Index, decodeDigest(snap.Data)
+	if want, ok := c.digests[snap.Index]; ok && want != n.digest {
+		c.fail("%s installed a snapshot at index %d whose state differs from what other nodes applied", n.id, snap.Index)
+	}
+	c.eventf("%s installed snapshot up to index %d from the leader", n.id, snap.Index)
+}
+
+func nextDigest(prev uint64, e raft.Entry) uint64 {
+	h := fnv.New64a()
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], prev)
+	h.Write(buf[:])
+	h.Write(e.Data)
+	return h.Sum64()
+}
+
+func encodeDigest(d uint64) []byte {
+	return binary.BigEndian.AppendUint64(nil, d)
+}
+
+func decodeDigest(b []byte) uint64 {
+	if len(b) != 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint64(b)
 }
 
 func (c *Cluster) apply(n *node, e raft.Entry) {
@@ -234,6 +298,12 @@ func (c *Cluster) apply(n *node, e raft.Entry) {
 		return
 	}
 	n.applied = e.Index
+	n.digest = nextDigest(n.digest, e)
+	if want, ok := c.digests[e.Index]; ok && want != n.digest {
+		c.fail("%s has a different state after index %d than another node", n.id, e.Index)
+		return
+	}
+	c.digests[e.Index] = n.digest
 	if prev, ok := c.committed[e.Index]; ok {
 		if prev.Term != e.Term || string(prev.Data) != string(e.Data) {
 			c.fail("state machine safety violated: %s applied %s at index %d, another node applied %s",
@@ -333,8 +403,9 @@ func (c *Cluster) checkLeaderCompleteness() error {
 	for _, id := range c.Leaders() {
 		r := c.nodes[id].raft
 		term := c.nodes[id].status.Term
+		snapIndex := r.Status().SnapshotIndex
 		for index, e := range c.committed {
-			if term <= c.commitIn[index] {
+			if term <= c.commitIn[index] || index <= snapIndex {
 				continue
 			}
 			if t, ok := r.LogTerm(index); !ok || t != e.Term {
@@ -378,8 +449,12 @@ func (c *Cluster) Restart(id string) {
 	n := c.nodes[id]
 	n.restarts++
 	c.start(n)
-	c.eventf("restart %s (term=%d votedFor=%q, %d log entries from disk)",
-		id, n.disk.hardState.Term, n.disk.hardState.VotedFor, len(n.disk.entries))
+	var snapIndex uint64
+	if n.disk.snapshot != nil {
+		snapIndex = n.disk.snapshot.Index
+	}
+	c.eventf("restart %s (term=%d votedFor=%q, snapshot up to %d, %d log entries from disk)",
+		id, n.disk.hardState.Term, n.disk.hardState.VotedFor, snapIndex, len(n.disk.entries))
 }
 
 func (c *Cluster) Status(id string) raft.Status {

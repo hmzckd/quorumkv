@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,6 +30,7 @@ type Config struct {
 
 	Heartbeat       time.Duration
 	ElectionTimeout time.Duration
+	SnapshotEvery   uint64
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -62,6 +64,12 @@ func Load(getenv func(string) string) (Config, error) {
 	if cfg.ElectionTimeout, err = parseDuration(getenv, "QK_ELECTION_TIMEOUT", "150ms"); err != nil {
 		return Config{}, err
 	}
+	snapEvery, err := strconv.ParseUint(valueOr(getenv("QK_SNAPSHOT_EVERY"), "1000"), 10, 64)
+	if err != nil || snapEvery == 0 {
+		return Config{}, fmt.Errorf("QK_SNAPSHOT_EVERY must be a positive number")
+	}
+	cfg.SnapshotEvery = snapEvery
+
 	if cfg.Heartbeat < Tick {
 		return Config{}, fmt.Errorf("QK_HEARTBEAT must be at least %s", Tick)
 	}
